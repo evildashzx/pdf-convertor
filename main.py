@@ -23,6 +23,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.ticker import FuncFormatter
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
@@ -33,10 +35,12 @@ from reportlab.platypus import (
     PageBreak, Image
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.utils import ImageReader
 
 # ========== CONFIG ==========
 OWNER_NAME = "Your Name or Company"
 LOGO_FILE = "logo.png"
+CURRENT_LOGO_PATH = None
 REVIEW_TO_SALES_RATIO = 100
 MONTHLY_REVIEW_RATIO = 0.05
 
@@ -330,9 +334,11 @@ def create_scatter_revenue(df_amazon, brand_map, max_price=20):
     if len(df_plot) < 3:
         return None, outliers
 
+    premium_cmap = LinearSegmentedColormap.from_list('premium_gold_navy', ['#D4AF37', '#0D1B2A'])
+
     fig, ax = plt.subplots(figsize=(10,6))
     scatter = ax.scatter(df_plot['price'], df_plot['monthly_rev'],
-                         c=df_plot['price'], cmap='cividis_r', alpha=0.72,
+                         c=df_plot['price'], cmap=premium_cmap, alpha=0.78,
                          edgecolors='w', linewidth=0.5, s=50)
     ax.set_yscale('log')
     ax.set_xlabel('Price ($)', fontsize=12)
@@ -340,13 +346,15 @@ def create_scatter_revenue(df_amazon, brand_map, max_price=20):
     ax.set_title(f'Price vs. Estimated Monthly Revenue (up to ${max_price})', fontweight='bold')
     ax.grid(True, linestyle='--', alpha=0.3)
     ax.set_xlim(0, max_price)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{int(y):,}" if y >= 1 else f"{y:g}"))
 
     max_price_row = df_plot.loc[df_plot['price'].idxmax()]
     ax.annotate(f"{brand_map.get(max_price_row['asin'], '?')}\n${max_price_row['price']:.2f}",
                 xy=(max_price_row['price'], max_price_row['monthly_rev']),
                 xytext=(10, -20), textcoords='offset points',
-                arrowprops=dict(arrowstyle='->', color='gray'),
-                fontsize=9, bbox=dict(boxstyle='round,pad=0.3', fc='yellow', alpha=0.7))
+                arrowprops=dict(arrowstyle='->', color='#263238', lw=1.2),
+                fontsize=9, color='#111111',
+                bbox=dict(boxstyle='round,pad=0.35', fc='white', ec='#0D1B2A', lw=1.2, alpha=0.92))
     cbar = fig.colorbar(scatter, ax=ax)
     cbar.set_label('Price tier')
 
@@ -402,8 +410,12 @@ def create_heatmap(df_amazon):
         return None
     corr = df_amazon[num_cols].corr()
     fig, ax = plt.subplots(figsize=(6,5))
-    sns.heatmap(corr, annot=True, cmap='coolwarm', center=0, ax=ax, square=True)
+    tick_values = np.linspace(-1, 1, 9)
+    sns.heatmap(corr, annot=True, cmap='coolwarm', center=0, ax=ax, square=True,
+                cbar_kws={'ticks': tick_values})
     ax.set_title('Correlation Heatmap', fontweight='bold')
+    ax.text(0.5, 1.02, 'Price vs. Rating vs. Reviews Count', transform=ax.transAxes,
+            ha='center', va='bottom', fontsize=9, color='#546E7A')
     plt.tight_layout()
     img_data = io.BytesIO()
     fig.savefig(img_data, format='png', dpi=150, bbox_inches='tight')
@@ -430,21 +442,37 @@ def create_boxplot_horizontal(df_amazon, brand_map, top_n=5):
     if 'Other Brands' in df_plot['brand_for_plot'].unique():
         brands_sorted.append('Other Brands')
 
+    representative_asin = {
+        brand: df_plot[df_plot['brand_for_plot'] == brand]['asin'].iloc[0]
+        for brand in brands_sorted
+        if len(df_plot[df_plot['brand_for_plot'] == brand]) > 0
+    }
+
     data_for_box = []
     clean_labels = []
     for brand in brands_sorted:
         prices = df_plot[df_plot['brand_for_plot'] == brand]['price'].values
         if len(prices) >= 2:
             data_for_box.append(prices)
-            clean_labels.append(brand)
+            asin_tail = representative_asin.get(brand, '')[-4:]
+            clean_labels.append(f"{brand} ({asin_tail})" if asin_tail else brand)
 
     if len(data_for_box) < 2:
         return None
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.boxplot(data_for_box, vert=False, patch_artist=True, tick_labels=clean_labels,
-               showmeans=True, meanline=True, medianprops={'color': '#8E24AA', 'linewidth': 2},
-               boxprops={'facecolor': '#BBDEFB', 'alpha': 0.75})
+    ax.boxplot(
+        data_for_box,
+        vert=False,
+        patch_artist=True,
+        tick_labels=clean_labels,
+        showmeans=True,
+        meanline=True,
+        medianprops={'color': '#0D47A1', 'linewidth': 2},
+        boxprops={'facecolor': '#D7ECFF', 'edgecolor': '#1E88E5', 'alpha': 0.85},
+        whiskerprops={'color': '#455A64', 'linewidth': 1.2},
+        capprops={'color': '#455A64', 'linewidth': 1.2},
+    )
     ax.set_title('Price Distribution by Brand (Top 5 + Other Brands)', fontweight='bold')
     ax.set_xlabel('Price ($)')
     ax.set_ylabel('Brand')
@@ -459,6 +487,7 @@ def create_boxplot_horizontal(df_amazon, brand_map, top_n=5):
 
 # ========== PDF UTILS ==========
 def add_page_number(canvas_obj, doc):
+    global CURRENT_LOGO_PATH
     canvas_obj.saveState()
     canvas_obj.setStrokeColor(colors.HexColor('#B0BEC5'))
     canvas_obj.setLineWidth(0.8)
@@ -472,6 +501,13 @@ def add_page_number(canvas_obj, doc):
     canvas_obj.drawRightString(20*cm, 0.5*cm, f"Page {page_num}")
     date_str = datetime.now().strftime('%d.%m.%Y')
     canvas_obj.drawString(1*cm, 0.5*cm, f"Market Data: {date_str} | Confidential Analysis")
+    if CURRENT_LOGO_PATH and os.path.exists(CURRENT_LOGO_PATH):
+        try:
+            logo_reader = ImageReader(CURRENT_LOGO_PATH)
+            canvas_obj.drawImage(logo_reader, A4[0] - 3.4*cm, 0.28*cm, width=2.0*cm, height=0.5*cm,
+                                 preserveAspectRatio=True, mask='auto')
+        except Exception:
+            pass
     canvas_obj.restoreState()
 
 # ========== PDF SECTIONS ==========
@@ -509,7 +545,8 @@ def create_title_page(elements, search_query, date_str, logo_path=None, product_
         except Exception:
             inserted_image = False
     if not inserted_image:
-        placeholder = Table([["Category Visual"]], colWidths=[7*cm], rowHeights=[4.2*cm])
+        visual_markup = "<para align='center'><font size='30' color='#1A4D8C'>✦</font><br/><font size='11' color='#455A64'>Niche emblem</font></para>"
+        placeholder = Table([[Paragraph(visual_markup, styles['Normal'])]], colWidths=[7*cm], rowHeights=[4.2*cm])
         placeholder.setStyle(TableStyle([
             ('BOX', (0,0), (-1,-1), 1, colors.HexColor('#90A4AE')),
             ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F5F7FA')),
@@ -585,7 +622,7 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
         ["Avg Rating", f"{df_amazon['rating'].mean():.2f}"],
         ["Avg Reviews (Top10)", f"{avg_reviews:,.0f}"],
         ["Competition (final)", final_competition],
-        ["Saturation Index (CR3)", f"{sat_score:.1f}% ({concentration})"],
+        ["Saturation Index (CR3)", f"{sat_score:.1f}%"],
         ["Avg. Revenue per Listing", format_compact_currency(market_size / max(1, df_amazon['asin'].nunique()))],
     ]
     if df_details is not None and 'is_fsa_eligible' in df_details.columns:
@@ -605,9 +642,9 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
     for row_idx, row in enumerate(data[1:], start=1):
         if row[0] == "Saturation Index (CR3)" and sat_score > 70:
             style.extend([
-                ('BACKGROUND', (1, row_idx), (1, row_idx), colors.HexColor('#FFCDD2')),
-                ('TEXTCOLOR', (1, row_idx), (1, row_idx), colors.HexColor('#B71C1C')),
-                ('FONTNAME', (1, row_idx), (1, row_idx), 'Helvetica-Bold')
+                ('BACKGROUND', (0, row_idx), (1, row_idx), colors.HexColor('#FFCDD2')),
+                ('TEXTCOLOR', (0, row_idx), (1, row_idx), colors.HexColor('#B71C1C')),
+                ('FONTNAME', (0, row_idx), (1, row_idx), 'Helvetica-Bold')
             ])
     table.setStyle(TableStyle(style))
     elements.append(table)
@@ -638,20 +675,8 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
     )
 
     has_velocity_data = any(v > 0 for v in velocities.values())
-    data = [["Pos", "ASIN", "Brand", "Price", "Rating", "Reviews", "Est. Monthly Sp", "LQS", "Traffic"]]
-    if has_velocity_data:
-        data[0].append("Vel")
-    best_eff_row_idx = None
-    best_efficiency = -1
+    lqs_scores = []
     for _, row in top10.iterrows():
-        brand = brand_map.get(row['asin'], 'Unknown')
-        sponsored = bool(row.get('is_sponsored', False))
-        price = f"${row['price']:.2f}" if pd.notna(row.get('price')) else 'N/A'
-        rating = f"{row['rating']:.1f}" if pd.notna(row.get('rating')) else 'N/A'
-        reviews = format_number(row['reviews_count']) if pd.notna(row.get('reviews_count')) else '0'
-        monthly_rev = estimate_monthly_revenue(row)
-        est_rev_str = format_currency(monthly_rev)
-        velocity = velocities.get(row['asin'], 0)
         image_count = row.get('image_count', np.nan)
         if pd.isna(image_count):
             image_count = row.get('images_count', np.nan)
@@ -664,20 +689,42 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
             lqs_score += 15
         if has_aplus:
             lqs_score += 15
-        lqs_score = min(100, int(lqs_score))
-        traffic_dot = '<font color="#EF6C00">● Ads</font>' if sponsored else '<font color="#1565C0">● Organic</font>'
+        lqs_scores.append(min(100, int(lqs_score)))
+
+    include_lqs = len(set(lqs_scores)) > 1
+    data = [["Pos", "ASIN", "Brand", "Price", "Rating", "Reviews", "Est. Monthly Sp", "Traffic"]]
+    if include_lqs:
+        data[0].insert(7, "LQS")
+    if has_velocity_data:
+        data[0].append("Vel")
+    best_eff_row_idx = None
+    best_efficiency = -1
+    for idx, (_, row) in enumerate(top10.iterrows()):
+        brand = brand_map.get(row['asin'], 'Unknown')
+        sponsored = bool(row.get('is_sponsored', False))
+        price = f"${row['price']:.2f}" if pd.notna(row.get('price')) else 'N/A'
+        rating = f"{row['rating']:.1f}" if pd.notna(row.get('rating')) else 'N/A'
+        reviews = format_number(row['reviews_count']) if pd.notna(row.get('reviews_count')) else '0'
+        monthly_rev = estimate_monthly_revenue(row)
+        est_rev_str = format_currency(monthly_rev)
+        velocity = velocities.get(row['asin'], 0)
+        lqs_score = lqs_scores[idx]
+        traffic_dot = '<font color="#C62828">⬤ Ads</font>' if sponsored else '<font color="#2E7D32">⬤ Organic</font>'
+        asin = str(row.get('asin', 'N/A'))
+        asin_link = f'<link href="https://www.amazon.com/dp/{asin}">{asin}</link>' if asin != 'N/A' else asin
 
         row_data = [
             str(int(row['position'])),
-            Paragraph(str(row.get('asin', 'N/A')), ParagraphStyle('AsinCell', fontSize=7, leading=9)),
+            Paragraph(asin_link, ParagraphStyle('AsinCell', fontSize=7, leading=9, textColor=colors.HexColor('#0D47A1'))),
             Paragraph(truncate(brand, 16), cell_style),
             price,
             rating,
             reviews,
             est_rev_str,
-            str(lqs_score),
             Paragraph(traffic_dot, cell_style),
         ]
+        if include_lqs:
+            row_data.insert(7, str(lqs_score))
         if has_velocity_data:
             row_data.append(f"{velocity:.1f}" if velocity > 0 else "0.0")
         data.append(row_data)
@@ -688,7 +735,9 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
                 best_efficiency = eff
                 best_eff_row_idx = len(data) - 1
 
-    col_widths = [0.8*cm, 2.2*cm, 2.1*cm, 1.15*cm, 0.9*cm, 1.15*cm, 2.0*cm, 0.9*cm, 1.6*cm]
+    col_widths = [0.8*cm, 2.35*cm, 2.0*cm, 1.1*cm, 0.9*cm, 1.1*cm, 1.9*cm, 1.5*cm]
+    if include_lqs:
+        col_widths.insert(7, 0.8*cm)
     if has_velocity_data:
         col_widths.append(0.9*cm)
     table = Table(data, colWidths=col_widths)
@@ -697,7 +746,7 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
         ('TEXTCOLOR', (0,0), (-1,0), colors.white),
         ('ALIGN', (0,0), (-1,0), 'CENTER'),
         ('ALIGN', (2,1), (2,-1), 'LEFT'),
-        ('ALIGN', (3,1), (7,-1), 'RIGHT'),
+        ('ALIGN', (3,1), (6,-1), 'RIGHT'),
         ('ALIGN', (1,1), (1,-1), 'CENTER'),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
         ('FONTSIZE', (0,0), (-1,0), 7),
@@ -736,7 +785,7 @@ def create_advanced_review_insights(elements, df_reviews, brand_map, top_asins, 
                 for issue, pct, example in issues:
                     data.append([
                         issue,
-                        f"{pct:.0f}% of analyzed negative feedback",
+                        f"{pct:.0f}% of analyzed negative reviews mention this",
                         Paragraph(example, cell_style)
                     ])
                 t = Table(data, colWidths=[3.5*cm, 1.8*cm, 8*cm])
@@ -775,7 +824,7 @@ def create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, s
         total_rev = revenue_df['est_rev'].sum()
         top3_rev = revenue_df.sort_values('est_rev', ascending=False).head(3)['est_rev'].sum()
         if total_rev > 0:
-            recs.append(f"Top 3 ASINs control {top3_rev/total_rev*100:.1f}% of total niche revenue.")
+            recs.append(f"Revenue concentration: top 3 ASINs control {top3_rev/total_rev*100:.1f}% of total niche revenue.")
 
     if 'price' in df_amazon.columns:
         prices = df_amazon['price'].dropna()
@@ -788,7 +837,7 @@ def create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, s
                 recs.append("Premium segment seems underdeveloped – opportunity for a higher‑priced quality option.")
 
     if sat_score > 70:
-        recs.append("RED: Market is highly concentrated (top 3 brands >70% of reviews). <b>Entry is risky</b>; consider a distinct sub-niche or patented feature.")
+        recs.append(f"RED: High market concentration (CR3 = {sat_score:.1f}%). Significant barrier to entry.")
     elif sat_score > 50:
         recs.append("YELLOW: Moderate concentration. Differentiate with unique features to capture share.")
     else:
@@ -823,15 +872,45 @@ def create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, s
     else:
         recs.append("PPC Difficulty: <b>High</b>. Expect expensive auctions and slower profitability.")
 
-    recs.append("<b>Market Gaps:</b> Consider variants with black colorway, eco packaging, or 1000-piece bundle if absent in current leaders.")
+    if 'title' in df_amazon.columns:
+        leaders_text = " ".join(df_amazon.sort_values('position').head(10)['title'].dropna().astype(str).str.lower().tolist())
+        candidate_gaps = {
+            'black colorway': ['black'],
+            'eco packaging': ['eco', 'recycl', 'sustainable'],
+            '1000-piece bundle': ['1000', '1,000']
+        }
+        missing = [gap for gap, kws in candidate_gaps.items() if not any(k in leaders_text for k in kws)]
+        if missing:
+            recs.append(f"<b>Market Gaps:</b> Missing among current leaders: {', '.join(missing)}.")
 
     for r in recs:
         r = r.replace('sub‑niche', 'sub-niche').replace('sub■niche', 'sub-niche')
         elements.append(Paragraph(f"• {r}", styles['Normal']))
     elements.append(Spacer(1, 0.5*cm))
 
+def create_final_summary_page(elements, sat_score, sponsored_share, avg_rating, df_amazon):
+    styles = getSampleStyleSheet()
+    header = ParagraphStyle('FinalSummaryHeader', parent=styles['Heading2'], fontSize=16,
+                            textColor=colors.HexColor('#1A4D8C'), spaceAfter=12)
+    elements.append(PageBreak())
+    elements.append(Paragraph("Executive Summary", header))
+
+    market_size = calculate_market_size(df_amazon)
+    avg_price = df_amazon['price'].dropna().mean() if 'price' in df_amazon.columns else 0
+    bullets = [
+        f"Estimated monthly niche revenue: <b>{format_compact_currency(market_size)}</b>.",
+        f"Saturation index (CR3): <b>{sat_score:.1f}%</b>.",
+        f"Sponsored listings share: <b>{sponsored_share:.1f}%</b>.",
+        f"Average product rating: <b>{avg_rating:.2f}</b>.",
+        f"Average price level: <b>${avg_price:.2f}</b>."
+    ]
+    for item in bullets:
+        elements.append(Paragraph(f"• {item}", styles['Normal']))
+        elements.append(Spacer(1, 0.18*cm))
+
 # ========== MAIN ==========
 def generate_report(input_dir, output_file):
+    global CURRENT_LOGO_PATH
     print("="*60)
     print("PREMIUM AMAZON REPORT GENERATOR v13.0 – ФИНАЛЬНАЯ ВЕРСИЯ")
     print("="*60)
@@ -857,6 +936,7 @@ def generate_report(input_dir, output_file):
     date_str = datetime.now().strftime("%d.%m.%Y")
     sat_score = saturation_index(df_amazon, brand_map)
     logo_path = os.path.join(input_dir, LOGO_FILE) if os.path.exists(os.path.join(input_dir, LOGO_FILE)) else None
+    CURRENT_LOGO_PATH = logo_path
     df_with_rev = df_amazon.copy()
     df_with_rev['est_rev'] = df_with_rev.apply(estimate_monthly_revenue, axis=1)
     top_row = df_with_rev.sort_values('est_rev', ascending=False).head(1)
@@ -945,6 +1025,7 @@ def generate_report(input_dir, output_file):
     create_advanced_review_insights(elements, df_reviews, brand_map, top_asins, pain_by_brand)
     create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, sponsored_share,
                                    has_low_review_top, pain_by_brand)
+    create_final_summary_page(elements, sat_score, sponsored_share, avg_rating, df_amazon)
 
     doc.build(elements, onFirstPage=add_page_number, onLaterPages=add_page_number)
     print(f"\nReport successfully generated: {output_file}")

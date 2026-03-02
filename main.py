@@ -140,19 +140,29 @@ def load_data(input_dir):
             print(f"Removed {before - len(df)} duplicated rows by ASIN")
         data['amazon_final'] = df
 
+        details_brand_map = {}
+        df_details = data.get('product_details')
+        if df_details is not None and 'asin' in df_details.columns and 'brand' in df_details.columns:
+            details_clean = df_details.dropna(subset=['asin']).drop_duplicates(subset=['asin'], keep='first')
+            for _, drow in details_clean.iterrows():
+                if pd.notna(drow.get('brand')):
+                    details_brand_map[drow['asin']] = normalize_brand(str(drow.get('brand')))
+
         data['brand_map'] = {}
         has_brand_col = 'brand' in df.columns
         for _, row in df.iterrows():
-            brand = None
-            if has_brand_col and pd.notna(row.get('brand')):
-                brand = normalize_brand(str(row.get('brand')))
+            asin = row['asin']
+            brand = details_brand_map.get(asin)
+            if not brand or brand == 'Generic / N/A':
+                if has_brand_col and pd.notna(row.get('brand')):
+                    brand = normalize_brand(str(row.get('brand')))
             if not brand or brand == 'Generic / N/A':
                 if pd.notna(row.get('title')):
                     fallback = extract_brand_from_title(row['title'])
                     brand = normalize_brand(fallback)
                 else:
                     brand = 'Generic / N/A'
-            data['brand_map'][row['asin']] = brand
+            data['brand_map'][asin] = brand
     else:
         data['brand_map'] = {}
 
@@ -334,7 +344,7 @@ def create_scatter_revenue(df_amazon, brand_map, max_price=20):
     if len(df_plot) < 3:
         return None, outliers
 
-    premium_cmap = LinearSegmentedColormap.from_list('premium_emerald_gold', ['#0B1F2A', '#1F6F78', '#C9A227'])
+    premium_cmap = LinearSegmentedColormap.from_list('premium_gold_navy', ['#D4AF37', '#0D1B2A'])
 
     fig, ax = plt.subplots(figsize=(10,6))
     scatter = ax.scatter(df_plot['price'], df_plot['monthly_rev'],
@@ -431,7 +441,7 @@ def create_heatmap(df_amazon):
     plt.close(fig)
     return img_data
 
-def create_boxplot_horizontal(df_amazon, brand_map, top_n=5):
+def create_price_distribution_violin(df_amazon, brand_map, top_n=6):
     if df_amazon is None or 'price' not in df_amazon.columns or 'asin' not in df_amazon.columns:
         return None
     df = df_amazon.copy()
@@ -440,64 +450,45 @@ def create_boxplot_horizontal(df_amazon, brand_map, top_n=5):
     if df.empty:
         return None
 
-    group_col = 'brand'
-    brand_counts = df['brand'].value_counts()
-    top_groups = brand_counts[brand_counts >= 2].head(top_n).index.tolist()
-    if len(top_groups) < 2:
-        df['asin_group'] = df['asin'].astype(str).str[:4]
-        asin_counts = df['asin_group'].value_counts()
-        top_groups = asin_counts[asin_counts >= 2].head(top_n).index.tolist()
-        group_col = 'asin_group'
-
-    if len(top_groups) < 2:
+    counts = df['brand'].value_counts()
+    top_brands = counts[counts >= 2].head(top_n).index.tolist()
+    if len(top_brands) < 2:
         return None
 
-    df['group_for_plot'] = df[group_col].apply(lambda x: x if x in top_groups else 'Other Brands')
-    df_plot = df[df['group_for_plot'].notna() & (df['group_for_plot'] != '')]
+    df['brand_for_plot'] = df['brand'].apply(lambda x: x if x in top_brands else 'Other Brands')
+    grouped = df.groupby('brand_for_plot')['price'].count().sort_values(ascending=False)
+    plot_order = [b for b in grouped.index.tolist() if b != 'Other Brands']
+    if 'Other Brands' in grouped.index:
+        plot_order.append('Other Brands')
 
-    groups_sorted = [g for g in top_groups if g in df_plot['group_for_plot'].unique()]
-    if 'Other Brands' in df_plot['group_for_plot'].unique():
-        groups_sorted.append('Other Brands')
-
-    representative_asin = {
-        group: str(df_plot[df_plot['group_for_plot'] == group]['asin'].iloc[0])
-        for group in groups_sorted
-        if len(df_plot[df_plot['group_for_plot'] == group]) > 0
-    }
-
-    data_for_box = []
-    clean_labels = []
-    for group in groups_sorted:
-        prices = df_plot[df_plot['group_for_plot'] == group]['price'].values
-        if len(prices) >= 2:
-            data_for_box.append(prices)
-            if group == 'Other Brands':
-                clean_labels.append('Other Brands')
-            elif group_col == 'brand':
-                clean_labels.append(f"{group} | ASIN: {representative_asin.get(group, 'N/A')[-6:]}")
-            else:
-                clean_labels.append(f"ASIN cohort: {group}xx")
-
-    if len(data_for_box) < 2:
-        return None
-
-    fig, ax = plt.subplots(figsize=(12.8, 6.4))
-    ax.boxplot(
-        data_for_box,
-        vert=False,
-        patch_artist=True,
-        tick_labels=clean_labels,
-        showmeans=True,
-        meanline=True,
-        medianprops={'color': '#0D47A1', 'linewidth': 2},
-        boxprops={'facecolor': '#D7ECFF', 'edgecolor': '#1E88E5', 'alpha': 0.85},
-        whiskerprops={'color': '#455A64', 'linewidth': 1.2},
-        capprops={'color': '#455A64', 'linewidth': 1.2},
+    fig, ax = plt.subplots(figsize=(12.8, 6.6))
+    sns.violinplot(
+        data=df,
+        x='price',
+        y='brand_for_plot',
+        order=plot_order,
+        inner='quartile',
+        cut=0,
+        linewidth=1.1,
+        palette='Blues',
+        ax=ax
     )
-    ax.set_title('Price Distribution by Brand/ASIN Cohort', fontweight='bold')
+    sns.stripplot(
+        data=df,
+        x='price',
+        y='brand_for_plot',
+        order=plot_order,
+        color='#0D47A1',
+        alpha=0.35,
+        size=2.8,
+        jitter=0.16,
+        ax=ax
+    )
+
+    ax.set_title('Price Distribution by Brand (Violin + Data Points)', fontweight='bold')
     ax.set_xlabel('Price ($)')
     ax.set_ylabel('Brand')
-    ax.grid(True, axis='x', linestyle='--', alpha=0.45)
+    ax.grid(True, axis='x', linestyle='--', alpha=0.38)
 
     plt.tight_layout()
     img_data = io.BytesIO()
@@ -544,9 +535,6 @@ def create_title_page(elements, search_query, date_str, logo_path=None, product_
         textColor=colors.HexColor('#123A6F'), alignment=1, spaceAfter=26, fontName='Helvetica-Bold'
     )
     elements.append(Paragraph(f"<b>{search_query}</b>", ParagraphStyle('KeywordFocusXL', parent=keyword_style, fontSize=42, spaceAfter=14)))
-    elements.append(Paragraph("Detailed Market Landscape &amp; Entry Strategy", ParagraphStyle(
-        'Subtitle', parent=styles['Normal'], fontSize=11, alignment=1, textColor=colors.HexColor('#455A64'), spaceAfter=18
-    )))
 
     inserted_image = False
     if logo_path and os.path.exists(logo_path):
@@ -578,7 +566,12 @@ def create_title_page(elements, search_query, date_str, logo_path=None, product_
         ]))
         elements.append(placeholder)
 
-    elements.append(Spacer(1, 5.3*cm))
+    elements.append(Spacer(1, 0.35*cm))
+    elements.append(Paragraph("Detailed Market Landscape &amp; Entry Strategy", ParagraphStyle(
+        'Subtitle', parent=styles['Normal'], fontSize=11, alignment=1, textColor=colors.HexColor('#455A64'), spaceAfter=12
+    )))
+
+    elements.append(Spacer(1, 4.6*cm))
     footer_style = ParagraphStyle(
         'Footer',
         parent=styles['Normal'],
@@ -794,10 +787,10 @@ def create_advanced_review_insights(elements, df_reviews, brand_map, top_asins, 
                 for issue, pct, example in issues:
                     data.append([
                         issue,
-                        f"{pct:.0f}% of analyzed negative reviews mention this",
+                        Paragraph(f"{pct:.0f}% of negative reviews", ParagraphStyle('FreqStyle', fontSize=7.4, leading=8.6, alignment=1)),
                         Paragraph(example, cell_style)
                     ])
-                t = Table(data, colWidths=[3.2*cm, 2.2*cm, 7.9*cm])
+                t = Table(data, colWidths=[3.2*cm, 2.6*cm, 7.5*cm])
                 t.setStyle(TableStyle([
                     ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1A4D8C')),
                     ('TEXTCOLOR', (0,0), (-1,0), colors.white),
@@ -1020,12 +1013,14 @@ def generate_report(input_dir, output_file):
         elements.append(Image(hist, width=14*cm, height=6*cm))
         elements.append(Spacer(1, 0.5*cm))
 
+    elements.append(PageBreak())
+    elements.append(Paragraph("Correlation Heatmap &amp; Brand Price Distribution", ParagraphStyle('SectionHeader2', fontSize=15, textColor=colors.HexColor('#1A4D8C'), spaceAfter=8)))
     hm = create_heatmap(df_amazon)
     if hm:
         elements.append(Image(hm, width=12*cm, height=10*cm))
         elements.append(Spacer(1, 0.5*cm))
 
-    bp = create_boxplot_horizontal(df_amazon, brand_map)
+    bp = create_price_distribution_violin(df_amazon, brand_map)
     if bp:
         elements.append(Image(bp, width=14*cm, height=8*cm))
         elements.append(Spacer(1, 0.5*cm))

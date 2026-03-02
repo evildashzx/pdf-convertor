@@ -334,7 +334,7 @@ def create_scatter_revenue(df_amazon, brand_map, max_price=20):
     if len(df_plot) < 3:
         return None, outliers
 
-    premium_cmap = LinearSegmentedColormap.from_list('premium_gold_navy', ['#D4AF37', '#0D1B2A'])
+    premium_cmap = LinearSegmentedColormap.from_list('premium_emerald_gold', ['#0B1F2A', '#1F6F78', '#C9A227'])
 
     fig, ax = plt.subplots(figsize=(10,6))
     scatter = ax.scatter(df_plot['price'], df_plot['monthly_rev'],
@@ -342,21 +342,29 @@ def create_scatter_revenue(df_amazon, brand_map, max_price=20):
                          edgecolors='w', linewidth=0.5, s=50)
     ax.set_yscale('log')
     ax.set_xlabel('Price ($)', fontsize=12)
-    ax.set_ylabel('Est. Monthly Revenue ($, log scale)', fontsize=12)
+    ax.set_ylabel('Monthly Revenue ($)', fontsize=12)
     ax.set_title(f'Price vs. Estimated Monthly Revenue (up to ${max_price})', fontweight='bold')
     ax.grid(True, linestyle='--', alpha=0.3)
     ax.set_xlim(0, max_price)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{int(y):,}" if y >= 1 else f"{y:g}"))
 
-    max_price_row = df_plot.loc[df_plot['price'].idxmax()]
-    ax.annotate(f"{brand_map.get(max_price_row['asin'], '?')}\n${max_price_row['price']:.2f}",
-                xy=(max_price_row['price'], max_price_row['monthly_rev']),
-                xytext=(10, -20), textcoords='offset points',
-                arrowprops=dict(arrowstyle='->', color='#263238', lw=1.2),
-                fontsize=9, color='#111111',
-                bbox=dict(boxstyle='round,pad=0.35', fc='white', ec='#0D1B2A', lw=1.2, alpha=0.92))
-    cbar = fig.colorbar(scatter, ax=ax)
-    cbar.set_label('Price tier')
+    max_price_row = df.loc[df['price'].idxmax()]
+    if max_price_row['price'] <= max_price:
+        ax.annotate(f"{brand_map.get(max_price_row['asin'], '?')}\n${max_price_row['price']:.2f}",
+                    xy=(max_price_row['price'], max_price_row['monthly_rev']),
+                    xytext=(10, -20), textcoords='offset points',
+                    arrowprops=dict(arrowstyle='->', color='#263238', lw=1.2),
+                    fontsize=9, color='#111111',
+                    bbox=dict(boxstyle='round,pad=0.35', fc='white', ec='#0D1B2A', lw=1.2, alpha=0.92))
+    else:
+        ax.annotate(f"Top outlier: {brand_map.get(max_price_row['asin'], '?')}\n${max_price_row['price']:.2f}",
+                    xy=(max_price * 0.95, df_plot['monthly_rev'].max()),
+                    xytext=(-5, -25), textcoords='offset points', ha='right',
+                    fontsize=9, color='#111111',
+                    bbox=dict(boxstyle='round,pad=0.35', fc='white', ec='#0D1B2A', lw=1.2, alpha=0.92))
+    cbar = fig.colorbar(scatter, ax=ax, fraction=0.03, pad=0.02, aspect=30)
+    cbar.set_label('Price Tier', fontsize=9)
+    cbar.ax.tick_params(labelsize=8)
 
     plt.tight_layout()
     img_data = io.BytesIO()
@@ -377,7 +385,7 @@ def create_reviews_histogram_clipped(df_amazon, clip_max=5000):
     if len(clipped) > 0:
         ax.hist(clipped, bins=20, color='#1A4D8C', edgecolor='white', alpha=0.8, zorder=2)
     median_val = reviews.median()
-    ax.axvline(median_val, color='red', linestyle='--', linewidth=1.5, label=f'Median: {median_val:.0f}', zorder=5)
+    ax.axvline(median_val, color='#8B0000', linestyle='--', linewidth=2.4, label=f'Median: {median_val:.0f}', zorder=6)
     ax.set_xlabel('Number of Reviews', fontsize=11)
     ax.set_ylabel('Number of Products', fontsize=11)
     ax.set_title(f'Product Maturity Distribution (clipped at {clip_max} reviews)', fontsize=13, fontweight='bold')
@@ -432,35 +440,48 @@ def create_boxplot_horizontal(df_amazon, brand_map, top_n=5):
     if df.empty:
         return None
 
-    top_brands = df['brand'].value_counts().head(top_n).index.tolist()
-    df['brand_for_plot'] = df['brand'].apply(lambda x: x if x in top_brands else 'Other Brands')
-    df_plot = df[df['brand_for_plot'].notna() & (df['brand_for_plot'] != '')]
-    if len(df_plot) < 5:
+    group_col = 'brand'
+    brand_counts = df['brand'].value_counts()
+    top_groups = brand_counts[brand_counts >= 2].head(top_n).index.tolist()
+    if len(top_groups) < 2:
+        df['asin_group'] = df['asin'].astype(str).str[:4]
+        asin_counts = df['asin_group'].value_counts()
+        top_groups = asin_counts[asin_counts >= 2].head(top_n).index.tolist()
+        group_col = 'asin_group'
+
+    if len(top_groups) < 2:
         return None
 
-    brands_sorted = [b for b in top_brands if b in df_plot['brand_for_plot'].unique()]
-    if 'Other Brands' in df_plot['brand_for_plot'].unique():
-        brands_sorted.append('Other Brands')
+    df['group_for_plot'] = df[group_col].apply(lambda x: x if x in top_groups else 'Other Brands')
+    df_plot = df[df['group_for_plot'].notna() & (df['group_for_plot'] != '')]
+
+    groups_sorted = [g for g in top_groups if g in df_plot['group_for_plot'].unique()]
+    if 'Other Brands' in df_plot['group_for_plot'].unique():
+        groups_sorted.append('Other Brands')
 
     representative_asin = {
-        brand: df_plot[df_plot['brand_for_plot'] == brand]['asin'].iloc[0]
-        for brand in brands_sorted
-        if len(df_plot[df_plot['brand_for_plot'] == brand]) > 0
+        group: str(df_plot[df_plot['group_for_plot'] == group]['asin'].iloc[0])
+        for group in groups_sorted
+        if len(df_plot[df_plot['group_for_plot'] == group]) > 0
     }
 
     data_for_box = []
     clean_labels = []
-    for brand in brands_sorted:
-        prices = df_plot[df_plot['brand_for_plot'] == brand]['price'].values
+    for group in groups_sorted:
+        prices = df_plot[df_plot['group_for_plot'] == group]['price'].values
         if len(prices) >= 2:
             data_for_box.append(prices)
-            asin_tail = representative_asin.get(brand, '')[-4:]
-            clean_labels.append(f"{brand} ({asin_tail})" if asin_tail else brand)
+            if group == 'Other Brands':
+                clean_labels.append('Other Brands')
+            elif group_col == 'brand':
+                clean_labels.append(f"{group} | ASIN: {representative_asin.get(group, 'N/A')[-6:]}")
+            else:
+                clean_labels.append(f"ASIN cohort: {group}xx")
 
     if len(data_for_box) < 2:
         return None
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(12.8, 6.4))
     ax.boxplot(
         data_for_box,
         vert=False,
@@ -473,7 +494,7 @@ def create_boxplot_horizontal(df_amazon, brand_map, top_n=5):
         whiskerprops={'color': '#455A64', 'linewidth': 1.2},
         capprops={'color': '#455A64', 'linewidth': 1.2},
     )
-    ax.set_title('Price Distribution by Brand (Top 5 + Other Brands)', fontweight='bold')
+    ax.set_title('Price Distribution by Brand/ASIN Cohort', fontweight='bold')
     ax.set_xlabel('Price ($)')
     ax.set_ylabel('Brand')
     ax.grid(True, axis='x', linestyle='--', alpha=0.45)
@@ -513,18 +534,18 @@ def add_page_number(canvas_obj, doc):
 # ========== PDF SECTIONS ==========
 def create_title_page(elements, search_query, date_str, logo_path=None, product_image=None):
     styles = getSampleStyleSheet()
-    elements.append(Spacer(1, 3.2*cm))
+    elements.append(Spacer(1, 2.2*cm))
     elements.append(Paragraph("Amazon Niche Analysis", ParagraphStyle(
-        'BigTitle', parent=styles['Title'], fontSize=36, textColor=colors.HexColor('#1A4D8C'),
-        alignment=1, spaceAfter=16, fontName='Helvetica-Bold'
+        'BigTitle', parent=styles['Title'], fontSize=30, textColor=colors.HexColor('#1A4D8C'),
+        alignment=1, spaceAfter=12, fontName='Helvetica-Bold'
     )))
     keyword_style = ParagraphStyle(
         'KeywordFocus', parent=styles['Normal'], fontSize=24,
         textColor=colors.HexColor('#123A6F'), alignment=1, spaceAfter=26, fontName='Helvetica-Bold'
     )
-    elements.append(Paragraph(f"<b>{search_query}</b>", ParagraphStyle('KeywordFocusXL', parent=keyword_style, fontSize=36, spaceAfter=10)))
+    elements.append(Paragraph(f"<b>{search_query}</b>", ParagraphStyle('KeywordFocusXL', parent=keyword_style, fontSize=42, spaceAfter=14)))
     elements.append(Paragraph("Detailed Market Landscape &amp; Entry Strategy", ParagraphStyle(
-        'Subtitle', parent=styles['Normal'], fontSize=12, alignment=1, textColor=colors.HexColor('#455A64'), spaceAfter=18
+        'Subtitle', parent=styles['Normal'], fontSize=11, alignment=1, textColor=colors.HexColor('#455A64'), spaceAfter=18
     )))
 
     inserted_image = False
@@ -545,7 +566,7 @@ def create_title_page(elements, search_query, date_str, logo_path=None, product_
         except Exception:
             inserted_image = False
     if not inserted_image:
-        visual_markup = "<para align='center'><font size='30' color='#1A4D8C'>✦</font><br/><font size='11' color='#455A64'>Niche emblem</font></para>"
+        visual_markup = "<para align='center'><font size='34' color='#1A4D8C'>✧</font><br/><font size='12' color='#607D8B'>Nail style icon</font></para>"
         placeholder = Table([[Paragraph(visual_markup, styles['Normal'])]], colWidths=[7*cm], rowHeights=[4.2*cm])
         placeholder.setStyle(TableStyle([
             ('BOX', (0,0), (-1,-1), 1, colors.HexColor('#90A4AE')),
@@ -557,7 +578,7 @@ def create_title_page(elements, search_query, date_str, logo_path=None, product_
         ]))
         elements.append(placeholder)
 
-    elements.append(Spacer(1, 6.2*cm))
+    elements.append(Spacer(1, 5.3*cm))
     footer_style = ParagraphStyle(
         'Footer',
         parent=styles['Normal'],
@@ -629,18 +650,26 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
         fsa_pct = (df_details['is_fsa_eligible'].sum() / len(df_details)) * 100
         data.append(["FSA/HSA Eligible", f"{fsa_pct:.1f}%"])
 
-    table = Table(data, colWidths=[5.6*cm, 5.8*cm])
+    table = Table(data, colWidths=[5.8*cm, 6.0*cm])
     style = [
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1A4D8C')),
         ('TEXTCOLOR', (0,0), (-1,0), colors.white),
         ('ALIGN', (0,0), (-1,-1), 'LEFT'),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
         ('GRID', (0,0), (-1,-1), 1, colors.grey),
-        ('TOPPADDING', (0,0), (-1,-1), 9),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 9),
+        ('TOPPADDING', (0,0), (-1,-1), 11),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 11),
+        ('LEFTPADDING', (0,0), (-1,-1), 8),
+        ('RIGHTPADDING', (0,0), (-1,-1), 8),
     ]
     for row_idx, row in enumerate(data[1:], start=1):
         if row[0] == "Saturation Index (CR3)" and sat_score > 70:
+            style.extend([
+                ('BACKGROUND', (0, row_idx), (1, row_idx), colors.HexColor('#FFCDD2')),
+                ('TEXTCOLOR', (0, row_idx), (1, row_idx), colors.HexColor('#B71C1C')),
+                ('FONTNAME', (0, row_idx), (1, row_idx), 'Helvetica-Bold')
+            ])
+        if row[0] == "Competition (final)" and final_competition == "Very High":
             style.extend([
                 ('BACKGROUND', (0, row_idx), (1, row_idx), colors.HexColor('#FFCDD2')),
                 ('TEXTCOLOR', (0, row_idx), (1, row_idx), colors.HexColor('#B71C1C')),
@@ -667,39 +696,16 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
         elements.append(Paragraph("No products with estimated revenue > $500.", styles['Normal']))
         return
 
-    cell_style = ParagraphStyle(
-        'CellStyle',
-        fontSize=8,
-        leading=10,
-        wordWrap='CJK',
-    )
-
+    cell_style = ParagraphStyle('CellStyle', fontSize=8, leading=10, wordWrap='CJK')
     has_velocity_data = any(v > 0 for v in velocities.values())
-    lqs_scores = []
-    for _, row in top10.iterrows():
-        image_count = row.get('image_count', np.nan)
-        if pd.isna(image_count):
-            image_count = row.get('images_count', np.nan)
-        has_video = bool(row.get('has_video', False))
-        has_aplus = bool(row.get('has_aplus', row.get('has_a_plus', False)))
-        lqs_score = 40
-        if pd.notna(image_count):
-            lqs_score += min(30, float(image_count) * 3)
-        if has_video:
-            lqs_score += 15
-        if has_aplus:
-            lqs_score += 15
-        lqs_scores.append(min(100, int(lqs_score)))
 
-    include_lqs = len(set(lqs_scores)) > 1
-    data = [["Pos", "ASIN", "Brand", "Price", "Rating", "Reviews", "Est. Monthly Sp", "Traffic"]]
-    if include_lqs:
-        data[0].insert(7, "LQS")
+    data = [["Pos", "ASIN", "Brand", "Price", "Rating", "Reviews", "Est. Revenue", "SP", "Traffic Type"]]
     if has_velocity_data:
-        data[0].append("Vel")
+        data[0].append("Velocity")
+
     best_eff_row_idx = None
     best_efficiency = -1
-    for idx, (_, row) in enumerate(top10.iterrows()):
+    for _, row in top10.iterrows():
         brand = brand_map.get(row['asin'], 'Unknown')
         sponsored = bool(row.get('is_sponsored', False))
         price = f"${row['price']:.2f}" if pd.notna(row.get('price')) else 'N/A'
@@ -708,8 +714,8 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
         monthly_rev = estimate_monthly_revenue(row)
         est_rev_str = format_currency(monthly_rev)
         velocity = velocities.get(row['asin'], 0)
-        lqs_score = lqs_scores[idx]
-        traffic_dot = '<font color="#C62828">⬤ Ads</font>' if sponsored else '<font color="#2E7D32">⬤ Organic</font>'
+        traffic_label = 'Ads' if sponsored else 'Organic'
+        traffic_chip = '<font color="#C62828">⬤ Ads</font>' if sponsored else '<font color="#2E7D32">⬤ Organic</font>'
         asin = str(row.get('asin', 'N/A'))
         asin_link = f'<link href="https://www.amazon.com/dp/{asin}">{asin}</link>' if asin != 'N/A' else asin
 
@@ -721,10 +727,9 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
             rating,
             reviews,
             est_rev_str,
-            Paragraph(traffic_dot, cell_style),
+            traffic_label,
+            Paragraph(traffic_chip, cell_style),
         ]
-        if include_lqs:
-            row_data.insert(7, str(lqs_score))
         if has_velocity_data:
             row_data.append(f"{velocity:.1f}" if velocity > 0 else "0.0")
         data.append(row_data)
@@ -735,28 +740,31 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
                 best_efficiency = eff
                 best_eff_row_idx = len(data) - 1
 
-    col_widths = [0.8*cm, 2.35*cm, 2.0*cm, 1.1*cm, 0.9*cm, 1.1*cm, 1.9*cm, 1.5*cm]
-    if include_lqs:
-        col_widths.insert(7, 0.8*cm)
+    col_widths = [0.75*cm, 2.2*cm, 1.8*cm, 1.1*cm, 0.95*cm, 1.15*cm, 1.65*cm, 1.1*cm, 1.8*cm]
     if has_velocity_data:
-        col_widths.append(0.9*cm)
+        col_widths.append(0.95*cm)
+
     table = Table(data, colWidths=col_widths)
     style = [
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1A4D8C')),
         ('TEXTCOLOR', (0,0), (-1,0), colors.white),
         ('ALIGN', (0,0), (-1,0), 'CENTER'),
         ('ALIGN', (2,1), (2,-1), 'LEFT'),
-        ('ALIGN', (3,1), (6,-1), 'RIGHT'),
+        ('ALIGN', (3,1), (7,-1), 'CENTER'),
+        ('ALIGN', (8,1), (8,-1), 'CENTER'),
         ('ALIGN', (1,1), (1,-1), 'CENTER'),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,0), 7),
-        ('FONTSIZE', (0,1), (-1,-1), 8),
+        ('FONTSIZE', (0,0), (-1,0), 6.5),
+        ('FONTSIZE', (0,1), (-1,-1), 7.6),
         ('GRID', (0,0), (-1,-1), 1, colors.grey),
-        ('TOPPADDING', (0,0), (-1,-1), 6),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ('TOPPADDING', (0,0), (-1,-1), 6.5),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6.5),
     ]
+    if has_velocity_data:
+        style.append(('ALIGN', (9,1), (9,-1), 'CENTER'))
     if best_eff_row_idx is not None:
         style.append(('BACKGROUND', (0, best_eff_row_idx), (-1, best_eff_row_idx), colors.HexColor('#E8F5E9')))
+
     table.setStyle(TableStyle(style))
     elements.append(table)
     elements.append(Spacer(1, 0.5*cm))
@@ -779,7 +787,8 @@ def create_advanced_review_insights(elements, df_reviews, brand_map, top_asins, 
                 data = [["Issue", "Freq", "Example"]]
                 cell_style = ParagraphStyle(
                     'ExStyle',
-                    fontSize=8,
+                    fontSize=8.5,
+                    leading=10,
                     wordWrap='CJK'
                 )
                 for issue, pct, example in issues:
@@ -788,7 +797,7 @@ def create_advanced_review_insights(elements, df_reviews, brand_map, top_asins, 
                         f"{pct:.0f}% of analyzed negative reviews mention this",
                         Paragraph(example, cell_style)
                     ])
-                t = Table(data, colWidths=[3.5*cm, 1.8*cm, 8*cm])
+                t = Table(data, colWidths=[3.2*cm, 2.2*cm, 7.9*cm])
                 t.setStyle(TableStyle([
                     ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1A4D8C')),
                     ('TEXTCOLOR', (0,0), (-1,0), colors.white),
@@ -796,6 +805,8 @@ def create_advanced_review_insights(elements, df_reviews, brand_map, top_asins, 
                     ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
                     ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
                     ('FONTSIZE', (0,0), (-1,-1), 8),
+                    ('TOPPADDING', (0,0), (-1,-1), 7),
+                    ('BOTTOMPADDING', (0,0), (-1,-1), 7),
                 ]))
                 elements.append(t)
                 elements.append(Spacer(1, 0.3*cm))
@@ -1025,7 +1036,6 @@ def generate_report(input_dir, output_file):
     create_advanced_review_insights(elements, df_reviews, brand_map, top_asins, pain_by_brand)
     create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, sponsored_share,
                                    has_low_review_top, pain_by_brand)
-    create_final_summary_page(elements, sat_score, sponsored_share, avg_rating, df_amazon)
 
     doc.build(elements, onFirstPage=add_page_number, onLaterPages=add_page_number)
     print(f"\nReport successfully generated: {output_file}")

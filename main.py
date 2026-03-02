@@ -89,13 +89,24 @@ def normalize_brand(value):
 def normalize_asin(value):
     if pd.isna(value):
         return None
-    return str(value).strip().upper()
+    cleaned = re.sub(r'[^A-Za-z0-9]', '', str(value).strip().upper())
+    return cleaned if cleaned else None
 
 def get_brand_for_asin(asin, brand_map, default='Unknown'):
     asin_key = normalize_asin(asin)
     if not asin_key:
         return default
     return brand_map.get(asin_key, default)
+
+def parse_sponsored_flag(value):
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if pd.isna(value):
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    value_str = str(value).strip().lower()
+    return value_str in {'1', 'true', 'yes', 'y', 'ads', 'sponsored'}
 
 def extract_brand_from_title(title):
     if not isinstance(title, str):
@@ -655,7 +666,7 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
         ["Avg Rating", f"{df_amazon['rating'].mean():.2f}"],
         ["Avg Reviews (Top10)", f"{avg_reviews:,.0f}"],
         ["Competition (final)", final_competition],
-        ["Saturation Index (CR3)", f"{sat_score:.0f}%"],
+        ["Saturation Index (CR3)", f"{int(sat_score)}%"],
         ["Avg. Revenue per Listing", format_compact_currency(market_size / max(1, df_amazon['asin'].nunique()))],
     ]
     if df_details is not None and 'is_fsa_eligible' in df_details.columns:
@@ -717,9 +728,9 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
 
     best_eff_row_idx = None
     best_efficiency = -1
-    for _, row in top10.iterrows():
+    for rank_idx, (_, row) in enumerate(top10.iterrows(), start=1):
         brand = get_brand_for_asin(row['asin'], brand_map, 'Unknown')
-        sponsored = bool(row.get('is_sponsored', False))
+        sponsored = parse_sponsored_flag(row.get('is_sponsored', False))
         price = f"${row['price']:.2f}" if pd.notna(row.get('price')) else 'N/A'
         rating = f"{row['rating']:.1f}" if pd.notna(row.get('rating')) else 'N/A'
         reviews = format_number(row['reviews_count']) if pd.notna(row.get('reviews_count')) else '0'
@@ -732,7 +743,7 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
         asin_link = f'<link href="https://www.amazon.com/dp/{asin}">{asin}</link>' if asin != 'N/A' else asin
 
         row_data = [
-            str(int(row['position'])),
+            str(rank_idx),
             Paragraph(asin_link, ParagraphStyle('AsinCell', fontSize=7, leading=9, textColor=colors.HexColor('#0D47A1'))),
             Paragraph(truncate(brand, 16), cell_style),
             price,
@@ -860,7 +871,7 @@ def create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, s
                 recs.append("Premium segment seems underdeveloped – opportunity for a higher‑priced quality option.")
 
     if sat_score > 70:
-        recs.append(f"RED: High market concentration (CR3 = {sat_score:.0f}%). Significant barrier to entry.")
+        recs.append(f"RED: High market concentration (CR3 = {int(sat_score)}%). Significant barrier to entry.")
     elif sat_score > 50:
         recs.append("YELLOW: Moderate concentration. Differentiate with unique features to capture share.")
     else:

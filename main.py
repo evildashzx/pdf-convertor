@@ -86,6 +86,17 @@ def normalize_brand(value):
         return 'Generic / N/A'
     return cleaned
 
+def normalize_asin(value):
+    if pd.isna(value):
+        return None
+    return str(value).strip().upper()
+
+def get_brand_for_asin(asin, brand_map, default='Unknown'):
+    asin_key = normalize_asin(asin)
+    if not asin_key:
+        return default
+    return brand_map.get(asin_key, default)
+
 def extract_brand_from_title(title):
     if not isinstance(title, str):
         return "Unknown"
@@ -146,13 +157,16 @@ def load_data(input_dir):
             details_clean = df_details.dropna(subset=['asin']).drop_duplicates(subset=['asin'], keep='first')
             for _, drow in details_clean.iterrows():
                 if pd.notna(drow.get('brand')):
-                    details_brand_map[drow['asin']] = normalize_brand(str(drow.get('brand')))
+                    asin_key = normalize_asin(drow['asin'])
+                    if asin_key:
+                        details_brand_map[asin_key] = normalize_brand(str(drow.get('brand')))
 
         data['brand_map'] = {}
         has_brand_col = 'brand' in df.columns
         for _, row in df.iterrows():
             asin = row['asin']
-            brand = details_brand_map.get(asin)
+            asin_key = normalize_asin(asin)
+            brand = details_brand_map.get(asin_key)
             if not brand or brand == 'Generic / N/A':
                 if has_brand_col and pd.notna(row.get('brand')):
                     brand = normalize_brand(str(row.get('brand')))
@@ -162,7 +176,8 @@ def load_data(input_dir):
                     brand = normalize_brand(fallback)
                 else:
                     brand = 'Generic / N/A'
-            data['brand_map'][asin] = brand
+            if asin_key:
+                data['brand_map'][asin_key] = brand
     else:
         data['brand_map'] = {}
 
@@ -190,7 +205,8 @@ def saturation_index(df_amazon, brand_map):
     if df_amazon is None or 'reviews_count' not in df_amazon.columns:
         return 0
     df = df_amazon.copy()
-    df['brand'] = df['asin'].map(brand_map).fillna('Unknown')
+    df['asin_key'] = df['asin'].apply(normalize_asin)
+    df['brand'] = df['asin_key'].map(brand_map).fillna('Unknown')
     brand_reviews = df.groupby('brand')['reviews_count'].sum().sort_values(ascending=False)
     top3_sum = brand_reviews.head(3).sum()
     total = brand_reviews.sum()
@@ -360,14 +376,14 @@ def create_scatter_revenue(df_amazon, brand_map, max_price=20):
 
     max_price_row = df.loc[df['price'].idxmax()]
     if max_price_row['price'] <= max_price:
-        ax.annotate(f"{brand_map.get(max_price_row['asin'], '?')}\n${max_price_row['price']:.2f}",
+        ax.annotate(f"{get_brand_for_asin(max_price_row['asin'], brand_map, '?')}\n${max_price_row['price']:.2f}",
                     xy=(max_price_row['price'], max_price_row['monthly_rev']),
                     xytext=(10, -20), textcoords='offset points',
                     arrowprops=dict(arrowstyle='->', color='#263238', lw=1.2),
                     fontsize=9, color='#111111',
                     bbox=dict(boxstyle='round,pad=0.35', fc='white', ec='#0D1B2A', lw=1.2, alpha=0.92))
     else:
-        ax.annotate(f"Top outlier: {brand_map.get(max_price_row['asin'], '?')}\n${max_price_row['price']:.2f}",
+        ax.annotate(f"Top outlier: {get_brand_for_asin(max_price_row['asin'], brand_map, '?')}\n${max_price_row['price']:.2f}",
                     xy=(max_price * 0.95, df_plot['monthly_rev'].max()),
                     xytext=(-5, -25), textcoords='offset points', ha='right',
                     fontsize=9, color='#111111',
@@ -431,8 +447,8 @@ def create_heatmap(df_amazon):
     tick_values = np.linspace(-1, 1, 9)
     sns.heatmap(corr, annot=True, cmap='coolwarm', center=0, ax=ax, square=True,
                 cbar_kws={'ticks': tick_values})
-    ax.set_title('Correlation Heatmap', fontweight='bold')
-    ax.text(0.5, 1.02, 'Price vs. Rating vs. Reviews Count', transform=ax.transAxes,
+    ax.set_title('Correlation Heatmap', fontweight='bold', pad=24)
+    ax.text(0.5, 1.095, 'Price vs. Rating vs. Reviews Count', transform=ax.transAxes,
             ha='center', va='bottom', fontsize=9, color='#546E7A')
     plt.tight_layout()
     img_data = io.BytesIO()
@@ -445,7 +461,8 @@ def create_price_distribution_violin(df_amazon, brand_map, top_n=6):
     if df_amazon is None or 'price' not in df_amazon.columns or 'asin' not in df_amazon.columns:
         return None
     df = df_amazon.copy()
-    df['brand'] = df['asin'].map(brand_map).fillna('Generic / N/A')
+    df['asin_key'] = df['asin'].apply(normalize_asin)
+    df['brand'] = df['asin_key'].map(brand_map).fillna('Generic / N/A')
     df = df.dropna(subset=['price'])
     if df.empty:
         return None
@@ -466,11 +483,13 @@ def create_price_distribution_violin(df_amazon, brand_map, top_n=6):
         data=df,
         x='price',
         y='brand_for_plot',
+        hue='brand_for_plot',
         order=plot_order,
         inner='quartile',
         cut=0,
         linewidth=1.1,
         palette='Blues',
+        legend=False,
         ax=ax
     )
     sns.stripplot(
@@ -636,7 +655,7 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
         ["Avg Rating", f"{df_amazon['rating'].mean():.2f}"],
         ["Avg Reviews (Top10)", f"{avg_reviews:,.0f}"],
         ["Competition (final)", final_competition],
-        ["Saturation Index (CR3)", f"{sat_score:.1f}%"],
+        ["Saturation Index (CR3)", f"{sat_score:.0f}%"],
         ["Avg. Revenue per Listing", format_compact_currency(market_size / max(1, df_amazon['asin'].nunique()))],
     ]
     if df_details is not None and 'is_fsa_eligible' in df_details.columns:
@@ -692,14 +711,14 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
     cell_style = ParagraphStyle('CellStyle', fontSize=8, leading=10, wordWrap='CJK')
     has_velocity_data = any(v > 0 for v in velocities.values())
 
-    data = [["Pos", "ASIN", "Brand", "Price", "Rating", "Reviews", "Est. Revenue", "SP", "Traffic Type"]]
+    data = [["Pos", "ASIN", "Brand", "Price", "Rating", "Reviews", "Est. Rev", "SP", "Type"]]
     if has_velocity_data:
         data[0].append("Velocity")
 
     best_eff_row_idx = None
     best_efficiency = -1
     for _, row in top10.iterrows():
-        brand = brand_map.get(row['asin'], 'Unknown')
+        brand = get_brand_for_asin(row['asin'], brand_map, 'Unknown')
         sponsored = bool(row.get('is_sponsored', False))
         price = f"${row['price']:.2f}" if pd.notna(row.get('price')) else 'N/A'
         rating = f"{row['rating']:.1f}" if pd.notna(row.get('rating')) else 'N/A'
@@ -733,7 +752,7 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
                 best_efficiency = eff
                 best_eff_row_idx = len(data) - 1
 
-    col_widths = [0.75*cm, 2.2*cm, 1.8*cm, 1.1*cm, 0.95*cm, 1.15*cm, 1.65*cm, 1.1*cm, 1.8*cm]
+    col_widths = [0.78*cm, 2.3*cm, 2.05*cm, 1.1*cm, 0.95*cm, 1.15*cm, 1.55*cm, 1.0*cm, 1.52*cm]
     if has_velocity_data:
         col_widths.append(0.95*cm)
 
@@ -747,7 +766,7 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
         ('ALIGN', (8,1), (8,-1), 'CENTER'),
         ('ALIGN', (1,1), (1,-1), 'CENTER'),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,0), 6.5),
+        ('FONTSIZE', (0,0), (-1,0), 7.2),
         ('FONTSIZE', (0,1), (-1,-1), 7.6),
         ('GRID', (0,0), (-1,-1), 1, colors.grey),
         ('TOPPADDING', (0,0), (-1,-1), 6.5),
@@ -774,7 +793,7 @@ def create_advanced_review_insights(elements, df_reviews, brand_map, top_asins, 
         elements.append(Paragraph("No significant negative feedback found.", styles['Normal']))
     else:
         for asin, issues in list(pain_by_brand.items())[:3]:
-            brand = brand_map.get(asin, 'Unknown')
+            brand = get_brand_for_asin(asin, brand_map, 'Unknown')
             elements.append(Paragraph(f"• {brand}", styles['Heading3']))
             if issues:
                 data = [["Issue", "Freq", "Example"]]
@@ -841,7 +860,7 @@ def create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, s
                 recs.append("Premium segment seems underdeveloped – opportunity for a higher‑priced quality option.")
 
     if sat_score > 70:
-        recs.append(f"RED: High market concentration (CR3 = {sat_score:.1f}%). Significant barrier to entry.")
+        recs.append(f"RED: High market concentration (CR3 = {sat_score:.0f}%). Significant barrier to entry.")
     elif sat_score > 50:
         recs.append("YELLOW: Moderate concentration. Differentiate with unique features to capture share.")
     else:
@@ -885,32 +904,12 @@ def create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, s
         }
         missing = [gap for gap, kws in candidate_gaps.items() if not any(k in leaders_text for k in kws)]
         if missing:
-            recs.append(f"<b>Market Gaps:</b> Missing among current leaders: {', '.join(missing)}.")
+            recs.append(f"<b>Market Gaps:</b> Underrepresented among current leaders: {', '.join(missing)}. Validate demand with PPC tests and launch with these differentiators in main image/A+ content.")
 
     for r in recs:
         r = r.replace('sub‑niche', 'sub-niche').replace('sub■niche', 'sub-niche')
         elements.append(Paragraph(f"• {r}", styles['Normal']))
     elements.append(Spacer(1, 0.5*cm))
-
-def create_final_summary_page(elements, sat_score, sponsored_share, avg_rating, df_amazon):
-    styles = getSampleStyleSheet()
-    header = ParagraphStyle('FinalSummaryHeader', parent=styles['Heading2'], fontSize=16,
-                            textColor=colors.HexColor('#1A4D8C'), spaceAfter=12)
-    elements.append(PageBreak())
-    elements.append(Paragraph("Executive Summary", header))
-
-    market_size = calculate_market_size(df_amazon)
-    avg_price = df_amazon['price'].dropna().mean() if 'price' in df_amazon.columns else 0
-    bullets = [
-        f"Estimated monthly niche revenue: <b>{format_compact_currency(market_size)}</b>.",
-        f"Saturation index (CR3): <b>{sat_score:.1f}%</b>.",
-        f"Sponsored listings share: <b>{sponsored_share:.1f}%</b>.",
-        f"Average product rating: <b>{avg_rating:.2f}</b>.",
-        f"Average price level: <b>${avg_price:.2f}</b>."
-    ]
-    for item in bullets:
-        elements.append(Paragraph(f"• {item}", styles['Normal']))
-        elements.append(Spacer(1, 0.18*cm))
 
 # ========== MAIN ==========
 def generate_report(input_dir, output_file):
@@ -992,7 +991,7 @@ def generate_report(input_dir, output_file):
         for _, row in outliers.head(6).iterrows():
             outlier_rows.append([
                 str(row.get('asin', 'N/A')),
-                truncate(brand_map.get(row.get('asin'), 'Unknown'), 14),
+                truncate(get_brand_for_asin(row.get('asin'), brand_map, 'Unknown'), 14),
                 f"${row.get('price', 0):.2f}",
                 format_compact_currency(row.get('monthly_rev', 0))
             ])

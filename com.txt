@@ -1,0 +1,1 @@
+python generate_report.py --input ./папка_с_файлами --output report.pdf

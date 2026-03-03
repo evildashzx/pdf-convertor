@@ -39,7 +39,7 @@ from reportlab.lib.utils import ImageReader
 
 # ========== CONFIG ==========
 OWNER_NAME = "Your Name or Company"
-LOGO_FILE = "logo.png"
+LOGO_FILE = "icon.png"
 CURRENT_LOGO_PATH = None
 REVIEW_TO_SALES_RATIO = 100
 MONTHLY_REVIEW_RATIO = 0.05
@@ -458,8 +458,8 @@ def create_heatmap(df_amazon):
     tick_values = np.linspace(-1, 1, 9)
     sns.heatmap(corr, annot=True, cmap='coolwarm', center=0, ax=ax, square=True,
                 cbar_kws={'ticks': tick_values})
-    ax.set_title('Correlation Heatmap', fontweight='bold', pad=24)
-    ax.text(0.5, 1.095, 'Price vs. Rating vs. Reviews Count', transform=ax.transAxes,
+    ax.set_title('Correlation Heatmap', fontweight='bold', pad=28)
+    ax.text(0.5, 1.13, 'Price vs. Rating vs. Reviews Count', transform=ax.transAxes,
             ha='center', va='bottom', fontsize=9, color='#546E7A')
     plt.tight_layout()
     img_data = io.BytesIO()
@@ -738,7 +738,7 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
         est_rev_str = format_currency(monthly_rev)
         velocity = velocities.get(row['asin'], 0)
         traffic_label = 'Ads' if sponsored else 'Organic'
-        traffic_chip = '<font color="#C62828">⬤ Ads</font>' if sponsored else '<font color="#2E7D32">⬤ Organic</font>'
+        traffic_chip = '<font color="#C62828">Ads</font>' if sponsored else '<font color="#2E7D32">Organic</font>'
         asin = str(row.get('asin', 'N/A'))
         asin_link = f'<link href="https://www.amazon.com/dp/{asin}">{asin}</link>' if asin != 'N/A' else asin
 
@@ -780,6 +780,7 @@ def create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=5
         ('FONTSIZE', (0,0), (-1,0), 7.2),
         ('FONTSIZE', (0,1), (-1,-1), 7.6),
         ('GRID', (0,0), (-1,-1), 1, colors.grey),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
         ('TOPPADDING', (0,0), (-1,-1), 6.5),
         ('BOTTOMPADDING', (0,0), (-1,-1), 6.5),
     ]
@@ -949,19 +950,9 @@ def generate_report(input_dir, output_file):
     search_query = df_amazon['search_query'].iloc[0] if 'search_query' in df_amazon.columns else 'N/A'
     date_str = datetime.now().strftime("%d.%m.%Y")
     sat_score = saturation_index(df_amazon, brand_map)
-    logo_path = os.path.join(input_dir, LOGO_FILE) if os.path.exists(os.path.join(input_dir, LOGO_FILE)) else None
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    logo_path = os.path.join(project_root, LOGO_FILE) if os.path.exists(os.path.join(project_root, LOGO_FILE)) else None
     CURRENT_LOGO_PATH = logo_path
-    df_with_rev = df_amazon.copy()
-    df_with_rev['est_rev'] = df_with_rev.apply(estimate_monthly_revenue, axis=1)
-    top_row = df_with_rev.sort_values('est_rev', ascending=False).head(1)
-    product_image = None
-    if not top_row.empty and 'image' in top_row.columns and pd.notna(top_row.iloc[0].get('image')):
-        product_image = fetch_image_bytes(top_row.iloc[0].get('image'))
-    elif not top_row.empty and 'images' in top_row.columns and pd.notna(top_row.iloc[0].get('images')):
-        image_field = str(top_row.iloc[0].get('images'))
-        url_match = re.search(r'https?://[^\s,\]"\']+', image_field)
-        if url_match:
-            product_image = fetch_image_bytes(url_match.group(0))
 
     comp_reviews, avg_reviews = competition_level_by_reviews(df_amazon)
     final_competition = determine_final_competition(comp_reviews, sat_score)
@@ -985,7 +976,7 @@ def generate_report(input_dir, output_file):
     elements = []
 
     display_keyword = "Nail Studs" if str(search_query).strip().lower() == "nail studs" else f"Keyword: {search_query}"
-    create_title_page(elements, display_keyword, date_str, logo_path, product_image)
+    create_title_page(elements, display_keyword, date_str, logo_path, None)
     create_verdict_block(elements, sat_score, avg_rating, sponsored_share, comp_reviews, final_competition)
     create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_competition)
 

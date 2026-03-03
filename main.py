@@ -5,6 +5,7 @@
 Amazon Niche Premium Report Generator
 Version 17.0 – ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
 Основана на диагностике: PNG через BytesIO работает стабильно.
+Добавлен Strategic Intelligence Engine (Codex)
 """
 
 import os
@@ -42,6 +43,7 @@ LOGO_FILE = "icon.png"
 CURRENT_LOGO_PATH = None
 REVIEW_TO_SALES_RATIO = 100
 MONTHLY_REVIEW_RATIO = 0.05
+DEFAULT_TARGET_TOP10_DAILY_SALES = 15
 
 STOPWORDS_BRAND = set(['the', 'and', 'for', 'with', 'new', 'from', 'this', 'that', 'amazon', 'com', 'www', 'http', 'https'])
 GENERIC_BRANDS = {'', 'generic', 'n/a', 'na', 'none', 'unknown', 'unbranded'}
@@ -136,6 +138,7 @@ def load_data(input_dir):
         'product_details': os.path.join(input_dir, 'product_details.csv'),
         'reviews': os.path.join(input_dir, 'reviews.csv'),
         'product_history': os.path.join(input_dir, 'product_history.csv'),
+        'keyword_intel': os.path.join(input_dir, 'keyword_intel.csv'),
     }
     data = {}
     for key, path in files.items():
@@ -282,6 +285,382 @@ def compute_review_velocity(df_history):
                 vel = (last['reviews'] - first['reviews']) / days
                 velocities[asin] = max(0, vel)
     return velocities
+
+
+# ========== STRATEGIC INTELLIGENCE ENGINE ==========
+def _safe_num(value, default=0.0):
+    try:
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _resolve_history_columns(df_history):
+    if df_history is None:
+        return None
+    cols = set(df_history.columns)
+    review_col = 'reviews' if 'reviews' in cols else ('reviews_count' if 'reviews_count' in cols else None)
+    bsr_col = 'bsr' if 'bsr' in cols else ('rank' if 'rank' in cols else None)
+    price_col = 'price' if 'price' in cols else None
+    if not review_col or not price_col:
+        return None
+    return {'review': review_col, 'bsr': bsr_col, 'price': price_col}
+
+
+def build_market_dynamics_engine(df_history):
+    """30/90/180-day dynamics + derived strategic signals."""
+    if df_history is None or df_history.empty or 'asin' not in df_history.columns or 'date' not in df_history.columns:
+        return {'windows': {}, 'growth_rate': 0.0, 'competitive_acceleration_index': 0.0,
+                'review_barrier_trend': 0.0, 'entry_window_timing_signal': 0.0}
+
+    col_map = _resolve_history_columns(df_history)
+    if not col_map:
+        return {'windows': {}, 'growth_rate': 0.0, 'competitive_acceleration_index': 0.0,
+                'review_barrier_trend': 0.0, 'entry_window_timing_signal': 0.0}
+
+    df = df_history.copy()
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    df = df.dropna(subset=['date'])
+    if df.empty:
+        return {'windows': {}, 'growth_rate': 0.0, 'competitive_acceleration_index': 0.0,
+                'review_barrier_trend': 0.0, 'entry_window_timing_signal': 0.0}
+
+    df = df.sort_values(['asin', 'date'])
+    latest_date = df['date'].max()
+    asin_lifecycle = df.groupby('asin').agg(first_seen=('date', 'min'), last_seen=('date', 'max')).reset_index()
+
+    windows = {}
+    for window in (30, 90, 180):
+        start_date = latest_date - pd.Timedelta(days=window)
+        wdf = df[df['date'] >= start_date].copy()
+        if wdf.empty:
+            windows[window] = {}
+            continue
+
+        first_last = wdf.groupby('asin').agg(
+            first_date=('date', 'min'),
+            last_date=('date', 'max'),
+            first_reviews=(col_map['review'], 'first'),
+            last_reviews=(col_map['review'], 'last'),
+            first_price=(col_map['price'], 'first'),
+            last_price=(col_map['price'], 'last')
+        )
+        if col_map['bsr']:
+            bsr_df = wdf.groupby('asin').agg(first_bsr=(col_map['bsr'], 'first'), last_bsr=(col_map['bsr'], 'last'))
+            first_last = first_last.join(bsr_df, how='left')
+
+        active_days = (first_last['last_date'] - first_last['first_date']).dt.days.clip(lower=1)
+        review_velocity = ((first_last['last_reviews'] - first_last['first_reviews']) / active_days).clip(lower=0)
+        price_change_pct = ((first_last['last_price'] - first_last['first_price']) / first_last['first_price'].replace(0, np.nan))
+
+        new_entries = asin_lifecycle[(asin_lifecycle['first_seen'] >= start_date) & (asin_lifecycle['first_seen'] <= latest_date)]
+        deaths = asin_lifecycle[
+            (asin_lifecycle['last_seen'] >= start_date) &
+            (asin_lifecycle['last_seen'] <= latest_date - pd.Timedelta(days=14))
+        ]
+
+        end_snapshot = wdf[wdf['date'] == wdf['date'].max()].copy()
+        top10_review_barrier = float(end_snapshot.nlargest(10, col_map['review'])[col_map['review']].median()) if not end_snapshot.empty else 0
+
+        metrics = {
+            'review_velocity': float(review_velocity.mean()) if len(review_velocity) else 0.0,
+            'price_change_pct': float(price_change_pct.replace([np.inf, -np.inf], np.nan).median(skipna=True) or 0.0),
+            'bsr_movement_pct': 0.0,
+            'new_asin_entry_rate': float(len(new_entries) / max(1, window)),
+            'asin_death_rate': float(len(deaths) / max(1, window)),
+            'top10_review_barrier': top10_review_barrier,
+            'active_asins': int(wdf['asin'].nunique())
+        }
+        if col_map['bsr'] and 'first_bsr' in first_last.columns:
+            bsr_move = ((first_last['first_bsr'] - first_last['last_bsr']) / first_last['first_bsr'].replace(0, np.nan))
+            metrics['bsr_movement_pct'] = float(bsr_move.replace([np.inf, -np.inf], np.nan).median(skipna=True) or 0.0)
+        windows[window] = metrics
+
+    rev_30 = windows.get(30, {}).get('review_velocity', 0)
+    rev_180 = windows.get(180, {}).get('review_velocity', 0)
+    entry_30 = windows.get(30, {}).get('new_asin_entry_rate', 0)
+    entry_180 = windows.get(180, {}).get('new_asin_entry_rate', 0)
+    death_30 = windows.get(30, {}).get('asin_death_rate', 0)
+    price_30 = windows.get(30, {}).get('price_change_pct', 0)
+
+    market_growth_rate = ((rev_30 + 1e-6) / (rev_180 + 1e-6) - 1.0) * 100.0
+    competitive_acceleration_index = 50 + 25 * ((entry_30 - entry_180) * 30) + 20 * ((rev_30 - rev_180) / max(1e-6, rev_180 + 1e-6)) - 15 * death_30 * 30
+    competitive_acceleration_index = float(np.clip(competitive_acceleration_index, 0, 100))
+
+    barrier_30 = windows.get(30, {}).get('top10_review_barrier', 0)
+    barrier_180 = windows.get(180, {}).get('top10_review_barrier', 0)
+    review_barrier_trend = float(((barrier_30 + 1e-6) / (barrier_180 + 1e-6) - 1.0) * 100.0)
+
+    entry_window_timing_signal = 50 + 0.35 * market_growth_rate - 0.30 * review_barrier_trend - 20 * price_30 - 25 * death_30
+    entry_window_timing_signal = float(np.clip(entry_window_timing_signal, 0, 100))
+
+    return {
+        'windows': windows,
+        'growth_rate': float(market_growth_rate),
+        'competitive_acceleration_index': competitive_acceleration_index,
+        'review_barrier_trend': review_barrier_trend,
+        'entry_window_timing_signal': entry_window_timing_signal
+    }
+
+
+def build_keyword_intelligence_layer(df_keywords, df_amazon):
+    """Scoring model: traffic opportunity, ranking difficulty, keyword gap, sustainability."""
+    if df_keywords is None or df_keywords.empty:
+        return {'keyword_rows': pd.DataFrame(), 'scores': {}}
+
+    kdf = df_keywords.copy()
+    for col, default in [('search_volume', 0), ('trend', 0), ('difficulty_proxy', 50), ('long_tail_density', 0), ('traffic_share', 0)]:
+        if col not in kdf.columns:
+            kdf[col] = default
+
+    kdf['sv_norm'] = kdf['search_volume'] / max(1, kdf['search_volume'].max())
+    kdf['trend_norm'] = ((kdf['trend'] + 100) / 200).clip(0, 1)
+    kdf['difficulty_norm'] = (kdf['difficulty_proxy'] / 100).clip(0, 1)
+    kdf['lt_norm'] = kdf['long_tail_density'].clip(0, 1)
+    kdf['tci_norm'] = kdf['traffic_share'].clip(0, 1)
+
+    kdf['real_traffic_capture_opportunity'] = 100 * (0.40 * kdf['sv_norm'] + 0.25 * kdf['trend_norm'] + 0.20 * kdf['lt_norm'] + 0.15 * (1 - kdf['tci_norm']))
+    kdf['ranking_difficulty_score'] = 100 * (0.50 * kdf['difficulty_norm'] + 0.25 * kdf['tci_norm'] + 0.25 * (1 - kdf['lt_norm']))
+
+    competitor_terms = set()
+    if df_amazon is not None and 'title' in df_amazon.columns:
+        for title in df_amazon.head(10)['title'].dropna().astype(str).tolist():
+            competitor_terms.update([w.lower() for w in re.findall(r'[A-Za-z]{3,}', title)])
+    kdf['term_present_competitors'] = kdf['keyword'].astype(str).str.lower().apply(lambda x: int(any(w in competitor_terms for w in x.split())))
+    kdf['keyword_gap_vs_top10'] = 100 * (1 - kdf['term_present_competitors'])
+
+    volatility = kdf.get('trend_volatility', pd.Series([0] * len(kdf))).fillna(0).clip(0, 1)
+    kdf['demand_sustainability_score'] = 100 * (0.45 * kdf['trend_norm'] + 0.35 * (1 - volatility) + 0.20 * kdf['sv_norm'])
+
+    return {
+        'keyword_rows': kdf,
+        'scores': {
+            'real_traffic_capture_opportunity': float(kdf['real_traffic_capture_opportunity'].mean()),
+            'ranking_difficulty_score': float(kdf['ranking_difficulty_score'].mean()),
+            'keyword_gap_vs_top10': float(kdf['keyword_gap_vs_top10'].mean()),
+            'demand_sustainability_score': float(kdf['demand_sustainability_score'].mean())
+        }
+    }
+
+
+def build_unit_economics_simulator(params):
+    price = _safe_num(params.get('price'))
+    cpc = _safe_num(params.get('cpc'))
+    conversion = max(1e-6, _safe_num(params.get('conversion_rate')))
+    referral_fee = _safe_num(params.get('referral_fee'))
+    fba_fee = _safe_num(params.get('fba_fee'))
+    manufacturing = _safe_num(params.get('manufacturing_cost'))
+    shipping = _safe_num(params.get('shipping_cost'))
+    return_rate = _safe_num(params.get('return_rate'))
+    target_daily_sales = max(1, _safe_num(params.get('target_top10_daily_sales', DEFAULT_TARGET_TOP10_DAILY_SALES)))
+    ppc_budget_daily = _safe_num(params.get('ppc_budget_daily', 50))
+    launch_monthly_fixed_cost = _safe_num(params.get('launch_monthly_fixed_cost', 1500))
+    starting_capital = _safe_num(params.get('starting_capital', 15000))
+
+    unit_variable_cost = referral_fee + fba_fee + manufacturing + shipping + return_rate * price
+    contribution_before_ads = price - unit_variable_cost
+    ad_cost_per_order = cpc / conversion
+
+    break_even_acos = (max(0.0, contribution_before_ads) / max(price, 1e-6)) * 100
+    net_profit_unit = contribution_before_ads - ad_cost_per_order
+    net_margin = (net_profit_unit / max(price, 1e-6)) * 100
+
+    ppc_burn_rate_daily = (target_daily_sales * ad_cost_per_order)
+    monthly_profit = (net_profit_unit * target_daily_sales * 30) - launch_monthly_fixed_cost
+    months_to_break_even = np.inf if monthly_profit <= 0 else max(0.0, starting_capital / monthly_profit)
+
+    required_capital_buffer = max(0.0, (ppc_burn_rate_daily * 60) + (unit_variable_cost * target_daily_sales * 45))
+
+    return {
+        'break_even_acos': float(break_even_acos),
+        'net_margin': float(net_margin),
+        'required_daily_sales_top10': float(target_daily_sales),
+        'ppc_burn_rate_daily': float(ppc_burn_rate_daily),
+        'months_to_break_even': float(months_to_break_even if np.isfinite(months_to_break_even) else 999),
+        'required_capital_buffer': float(required_capital_buffer),
+        'unit_variable_cost': float(unit_variable_cost),
+        'ad_cost_per_order': float(ad_cost_per_order)
+    }
+
+
+def run_entry_simulation(review_barrier, competitor_review_velocity, required_daily_sales, ppc_budget, conversion_rate,
+                         n_iter=3000):
+    rng = np.random.default_rng(42)
+    conversion_rate = max(1e-6, conversion_rate)
+    days = []
+    success = 0
+    required_review_rate = []
+    capital_need = []
+
+    for _ in range(n_iter):
+        sampled_sales = max(1e-3, rng.normal(required_daily_sales, required_daily_sales * 0.2))
+        sampled_competitor_vel = max(0.01, rng.normal(competitor_review_velocity, max(0.1, competitor_review_velocity * 0.25)))
+        sampled_budget = max(1.0, rng.normal(ppc_budget, max(1.0, ppc_budget * 0.15)))
+        sampled_conv = max(1e-4, rng.normal(conversion_rate, conversion_rate * 0.15))
+
+        organic_ramp = sampled_sales * 0.55
+        net_rank_gain = max(0.01, organic_ramp - sampled_competitor_vel)
+        t_days = review_barrier / net_rank_gain
+        days.append(t_days)
+
+        rr = sampled_competitor_vel * 1.10
+        required_review_rate.append(rr)
+        cap = sampled_budget * (t_days / 30.0) + sampled_sales * 3.5 * (t_days / 30.0)
+        capital_need.append(cap)
+
+        if t_days <= 180 and sampled_budget / (sampled_sales / sampled_conv + 1e-6) >= 0.08:
+            success += 1
+
+    return {
+        'time_to_top10_days_p50': float(np.percentile(days, 50)),
+        'time_to_top10_days_p80': float(np.percentile(days, 80)),
+        'required_review_acquisition_rate': float(np.percentile(required_review_rate, 50)),
+        'capital_until_organic_stabilization': float(np.percentile(capital_need, 80)),
+        'probability_of_ranking_success': float(success / n_iter * 100)
+    }
+
+
+def build_competitor_positioning_map(df_amazon, df_details, brand_map):
+    if df_amazon is None or df_amazon.empty:
+        return {}
+    cdf = df_amazon.copy()
+    cdf['asin_key'] = cdf['asin'].apply(normalize_asin)
+    cdf['brand'] = cdf['asin_key'].map(brand_map).fillna('Unknown')
+    cdf['price'] = pd.to_numeric(cdf.get('price', 0), errors='coerce').fillna(0)
+    cdf['reviews_count'] = pd.to_numeric(cdf.get('reviews_count', 0), errors='coerce').fillna(0)
+    cdf['price_reviews_cluster'] = pd.cut(cdf['price'], bins=[-1, 15, 30, 9999], labels=['Budget', 'Mid', 'Premium']).astype(str) + '|' + pd.cut(cdf['reviews_count'], bins=[-1, 200, 1000, 1e9], labels=['LowTrust', 'Scaled', 'Dominant']).astype(str)
+
+    feature_density = 0
+    if df_details is not None and 'features' in df_details.columns:
+        temp = df_details.copy()
+        temp['feature_count'] = temp['features'].fillna('').astype(str).apply(lambda s: len([x for x in re.split(r'[|,;]', s) if x.strip()]))
+        feature_density = float(temp['feature_count'].mean())
+
+    brand_shares = cdf.groupby('brand')['reviews_count'].sum()
+    bdi = float((brand_shares.max() / max(1, brand_shares.sum())) * 100)
+    unique_feature_ratio = 1.0 / max(1.0, feature_density)
+    differentiation_saturation_index = float(np.clip((1 - unique_feature_ratio) * 100, 0, 100))
+    copycat_risk_index = float(np.clip(0.45 * differentiation_saturation_index + 0.35 * (100 - bdi) + 0.20 * (100 - cdf['price'].std() / max(1, cdf['price'].mean()) * 100), 0, 100))
+
+    return {
+        'price_reviews_cluster_distribution': cdf['price_reviews_cluster'].value_counts().to_dict(),
+        'feature_density_score': feature_density,
+        'brand_dominance_index': bdi,
+        'differentiation_saturation_index': differentiation_saturation_index,
+        'copycat_risk_index': copycat_risk_index
+    }
+
+
+def build_supply_risk_layer(unit_econ, competitor_map):
+    moq_units = 500
+    demand_per_day = max(1.0, unit_econ.get('required_daily_sales_top10', 1.0))
+    moq_sensitivity = (moq_units / demand_per_day) / 30.0
+    quality_failure_rate = 0.04
+    quality_failure_impact = quality_failure_rate * (unit_econ.get('unit_variable_cost', 0) + 5)
+    price_war_probability = float(np.clip(0.4 * competitor_map.get('copycat_risk_index', 0) + 0.35 * competitor_map.get('differentiation_saturation_index', 0) + 0.25 * (100 - competitor_map.get('brand_dominance_index', 0)), 0, 100))
+    copycat_speed_days = max(20.0, 120 - competitor_map.get('copycat_risk_index', 0))
+    brand_defensibility = float(np.clip(100 - (0.5 * competitor_map.get('copycat_risk_index', 0) + 0.3 * competitor_map.get('differentiation_saturation_index', 0) + 0.2 * price_war_probability), 0, 100))
+    return {
+        'moq_sensitivity_months_to_clear': float(moq_sensitivity),
+        'quality_failure_impact_per_unit': float(quality_failure_impact),
+        'price_war_probability_score': price_war_probability,
+        'copycat_speed_estimation_days': float(copycat_speed_days),
+        'brand_defensibility_score': brand_defensibility
+    }
+
+
+def build_final_decision_framework(dynamics, keyword_scores, unit_econ, simulation, competitor_map, supply_risk):
+    market_attractiveness = np.clip(
+        0.30 * (dynamics.get('entry_window_timing_signal', 0)) +
+        0.25 * keyword_scores.get('real_traffic_capture_opportunity', 0) +
+        0.20 * keyword_scores.get('demand_sustainability_score', 0) +
+        0.25 * (100 - competitor_map.get('brand_dominance_index', 0)), 0, 100
+    )
+    entry_feasibility = np.clip(
+        0.35 * (100 - keyword_scores.get('ranking_difficulty_score', 100)) +
+        0.25 * simulation.get('probability_of_ranking_success', 0) +
+        0.20 * (100 - max(-50, dynamics.get('review_barrier_trend', 0))) +
+        0.20 * np.clip(unit_econ.get('net_margin', 0) * 2, 0, 100), 0, 100
+    )
+    capital_risk = np.clip(
+        0.40 * np.clip(unit_econ.get('required_capital_buffer', 0) / 30000 * 100, 0, 100) +
+        0.30 * supply_risk.get('price_war_probability_score', 0) +
+        0.30 * (100 - supply_risk.get('brand_defensibility_score', 0)), 0, 100
+    )
+    probability_success = np.clip(
+        0.50 * simulation.get('probability_of_ranking_success', 0) +
+        0.30 * entry_feasibility +
+        0.20 * (100 - capital_risk), 0, 100
+    )
+
+    cap = unit_econ.get('required_capital_buffer', 0)
+    if cap < 5000:
+        tier = '<$5k (Not viable)'
+    elif cap < 15000:
+        tier = '$5k–$15k (High risk)'
+    elif cap < 30000:
+        tier = '$15k–$30k (Structured entry)'
+    else:
+        tier = '$30k+ (Competitive entry)'
+
+    return {
+        'market_attractiveness_score': float(market_attractiveness),
+        'entry_feasibility_score': float(entry_feasibility),
+        'capital_risk_score': float(capital_risk),
+        'probability_of_success': float(probability_success),
+        'recommended_capital_tier': tier
+    }
+
+
+def build_strategic_intelligence(data):
+    df_amazon = data.get('amazon_final')
+    df_history = data.get('product_history')
+    df_details = data.get('product_details')
+    df_keywords = data.get('keyword_intel')
+    brand_map = data.get('brand_map', {})
+
+    dynamics = build_market_dynamics_engine(df_history)
+    keyword_layer = build_keyword_intelligence_layer(df_keywords, df_amazon)
+
+    median_price = float(df_amazon['price'].dropna().median()) if df_amazon is not None and 'price' in df_amazon.columns else 25
+    unit_inputs = {
+        'price': median_price,
+        'cpc': float(df_keywords['cpc'].median()) if df_keywords is not None and 'cpc' in df_keywords.columns else 1.2,
+        'conversion_rate': 0.11,
+        'referral_fee': median_price * 0.15,
+        'fba_fee': 4.2,
+        'manufacturing_cost': median_price * 0.25,
+        'shipping_cost': 1.8,
+        'return_rate': 0.04,
+        'target_top10_daily_sales': DEFAULT_TARGET_TOP10_DAILY_SALES,
+        'ppc_budget_daily': 60,
+        'launch_monthly_fixed_cost': 1500,
+        'starting_capital': 15000,
+    }
+    unit_econ = build_unit_economics_simulator(unit_inputs)
+
+    sim = run_entry_simulation(
+        review_barrier=dynamics.get('windows', {}).get(30, {}).get('top10_review_barrier', 250),
+        competitor_review_velocity=max(0.5, dynamics.get('windows', {}).get(30, {}).get('review_velocity', 1.0)),
+        required_daily_sales=unit_econ['required_daily_sales_top10'],
+        ppc_budget=unit_inputs['ppc_budget_daily'],
+        conversion_rate=unit_inputs['conversion_rate']
+    )
+    competitor_map = build_competitor_positioning_map(df_amazon, df_details, brand_map)
+    supply_risk = build_supply_risk_layer(unit_econ, competitor_map)
+    final_scores = build_final_decision_framework(dynamics, keyword_layer.get('scores', {}), unit_econ, sim, competitor_map, supply_risk)
+
+    return {
+        'market_dynamics': dynamics,
+        'keyword_intelligence': keyword_layer,
+        'unit_economics': unit_econ,
+        'entry_simulation': sim,
+        'competitive_positioning': competitor_map,
+        'supply_risk': supply_risk,
+        'final_decision': final_scores,
+    }
 
 # ========== REVIEW ANALYSIS ==========
 def clean_review_text(text):
@@ -1090,6 +1469,82 @@ def create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, s
                 elements.append(KeepTogether(chunk))
     elements.append(Spacer(1, 0.5*cm))
 
+
+def create_strategic_intelligence_section(elements, strategic):
+    styles = getSampleStyleSheet()
+    header = ParagraphStyle('StrategicHeader', parent=styles['Heading2'], fontSize=16,
+                            textColor=colors.HexColor('#123A6F'), spaceAfter=10)
+    elements.append(PageBreak())
+    elements.append(Paragraph("Strategic-Level Market Entry Intelligence", header))
+
+    final_scores = strategic.get('final_decision', {})
+    score_rows = [["Metric", "Value"],
+                  ["Market Attractiveness Score", f"{final_scores.get('market_attractiveness_score', 0):.1f} / 100"],
+                  ["Entry Feasibility Score", f"{final_scores.get('entry_feasibility_score', 0):.1f} / 100"],
+                  ["Capital Risk Score", f"{final_scores.get('capital_risk_score', 0):.1f} / 100"],
+                  ["Probability of Success", f"{final_scores.get('probability_of_success', 0):.1f}%"],
+                  ["Recommended Capital Tier", final_scores.get('recommended_capital_tier', 'N/A')]]
+    score_table = Table(score_rows, colWidths=[8.0*cm, 8.0*cm])
+    score_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1A4D8C')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('GRID', (0,0), (-1,-1), 0.6, colors.HexColor('#B0BEC5')),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+    ]))
+    elements.append(score_table)
+    elements.append(Spacer(1, 0.35*cm))
+
+    dynamics = strategic.get('market_dynamics', {})
+    w30 = dynamics.get('windows', {}).get(30, {})
+    w90 = dynamics.get('windows', {}).get(90, {})
+    w180 = dynamics.get('windows', {}).get(180, {})
+    dyn_rows = [["Dynamics (formula-ready outputs)", "30d", "90d", "180d"],
+                ["Review velocity (Δreviews/day)", f"{w30.get('review_velocity', 0):.2f}", f"{w90.get('review_velocity', 0):.2f}", f"{w180.get('review_velocity', 0):.2f}"],
+                ["Price change %", f"{w30.get('price_change_pct', 0)*100:.2f}%", f"{w90.get('price_change_pct', 0)*100:.2f}%", f"{w180.get('price_change_pct', 0)*100:.2f}%"],
+                ["BSR movement %", f"{w30.get('bsr_movement_pct', 0)*100:.2f}%", f"{w90.get('bsr_movement_pct', 0)*100:.2f}%", f"{w180.get('bsr_movement_pct', 0)*100:.2f}%"],
+                ["New ASIN entry rate (per day)", f"{w30.get('new_asin_entry_rate', 0):.3f}", f"{w90.get('new_asin_entry_rate', 0):.3f}", f"{w180.get('new_asin_entry_rate', 0):.3f}"],
+                ["ASIN death rate (per day)", f"{w30.get('asin_death_rate', 0):.3f}", f"{w90.get('asin_death_rate', 0):.3f}", f"{w180.get('asin_death_rate', 0):.3f}"]]
+    dyn = Table(dyn_rows, colWidths=[7.0*cm, 3.0*cm, 3.0*cm, 3.0*cm])
+    dyn.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#ECEFF1')),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CFD8DC')),
+        ('ALIGN', (1,1), (-1,-1), 'RIGHT'),
+    ]))
+    elements.append(dyn)
+    elements.append(Spacer(1, 0.25*cm))
+
+    elements.append(Paragraph(
+        f"Growth rate: {dynamics.get('growth_rate', 0):.2f}% | Competitive acceleration index: {dynamics.get('competitive_acceleration_index', 0):.1f} | "
+        f"Review barrier trend: {dynamics.get('review_barrier_trend', 0):.2f}% | Entry timing signal: {dynamics.get('entry_window_timing_signal', 0):.1f}/100",
+        styles['BodyText']
+    ))
+    elements.append(Spacer(1, 0.2*cm))
+
+    kw = strategic.get('keyword_intelligence', {}).get('scores', {})
+    ue = strategic.get('unit_economics', {})
+    sim = strategic.get('entry_simulation', {})
+    comp = strategic.get('competitive_positioning', {})
+    sr = strategic.get('supply_risk', {})
+
+    compact_rows = [["Layer", "Primary outputs"],
+                    ["Keyword Intelligence", f"Traffic opportunity {kw.get('real_traffic_capture_opportunity', 0):.1f}; Ranking difficulty {kw.get('ranking_difficulty_score', 0):.1f}; Gap {kw.get('keyword_gap_vs_top10', 0):.1f}; Sustainability {kw.get('demand_sustainability_score', 0):.1f}"],
+                    ["Unit Economics", f"Break-even ACOS {ue.get('break_even_acos', 0):.1f}%; Net margin {ue.get('net_margin', 0):.1f}%; PPC burn/day ${ue.get('ppc_burn_rate_daily', 0):.0f}; Break-even months {ue.get('months_to_break_even', 0):.1f}"],
+                    ["Entry Simulation", f"Time to Top-10 p50 {sim.get('time_to_top10_days_p50', 0):.0f}d; p80 {sim.get('time_to_top10_days_p80', 0):.0f}d; Success {sim.get('probability_of_ranking_success', 0):.1f}%"],
+                    ["Competitive Positioning", f"Feature density {comp.get('feature_density_score', 0):.2f}; Brand dominance {comp.get('brand_dominance_index', 0):.1f}; Diff saturation {comp.get('differentiation_saturation_index', 0):.1f}; Copycat risk {comp.get('copycat_risk_index', 0):.1f}"],
+                    ["Supply & Risk", f"MOQ sensitivity {sr.get('moq_sensitivity_months_to_clear', 0):.2f} mo; Quality impact/unit ${sr.get('quality_failure_impact_per_unit', 0):.2f}; Price-war {sr.get('price_war_probability_score', 0):.1f}; Defensibility {sr.get('brand_defensibility_score', 0):.1f}"]]
+    compact = Table(compact_rows, colWidths=[4.5*cm, 11.5*cm])
+    compact.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#ECEFF1')),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CFD8DC')),
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+    ]))
+    elements.append(compact)
+    elements.append(Spacer(1, 0.2*cm))
+
+
 # ========== MAIN ==========
 def generate_report(input_dir, output_file):
     global CURRENT_LOGO_PATH
@@ -1100,6 +1555,7 @@ def generate_report(input_dir, output_file):
         print(f"Error: folder '{input_dir}' not found.")
         return
     data = load_data(input_dir)
+    strategic_intelligence = build_strategic_intelligence(data)
     df_amazon = data.get('amazon_final')
     df_details = data.get('product_details')
     df_reviews = data.get('reviews')
@@ -1207,8 +1663,13 @@ def generate_report(input_dir, output_file):
 
     create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, sponsored_share,
                                    has_low_review_top, pain_by_brand)
+    create_strategic_intelligence_section(elements, strategic_intelligence)
 
     doc.build(elements, onFirstPage=add_page_number, onLaterPages=add_page_number)
+    intelligence_path = os.path.splitext(output_file)[0] + '_strategic_intelligence.json'
+    with open(intelligence_path, 'w', encoding='utf-8') as fp:
+        json.dump(strategic_intelligence, fp, ensure_ascii=False, indent=2, default=lambda x: x if isinstance(x, (int, float, str, bool, list, dict)) else str(x))
+    print(f"Strategic intelligence JSON: {intelligence_path}")
     print(f"\nReport successfully generated: {output_file}")
     print("="*60)
 

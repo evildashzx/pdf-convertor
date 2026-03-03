@@ -32,7 +32,7 @@ from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, Image
+    PageBreak, Image, KeepTogether
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.utils import ImageReader
@@ -356,7 +356,7 @@ def extract_pain_points_by_brand(df_reviews, brand_map, top_asins, top_n=3):
     return result
 
 # ========== CHARTS ==========
-def create_scatter_revenue(df_amazon, brand_map, max_price=20):
+def create_scatter_revenue(df_amazon, brand_map, max_price=None):
     """Price vs Estimated Monthly Revenue (log scale) – возвращает BytesIO (PNG) и DataFrame выбросов"""
     if df_amazon is None or 'price' not in df_amazon.columns:
         return None, None
@@ -365,6 +365,10 @@ def create_scatter_revenue(df_amazon, brand_map, max_price=20):
     df = df[df['monthly_rev'] > 0].dropna(subset=['price', 'monthly_rev'])
     if len(df) < 3:
         return None, None
+
+    if max_price is None:
+        max_price = float(df['price'].quantile(0.95))
+    max_price = max(5.0, max_price)
 
     outliers = df[df['price'] > max_price].sort_values('price', ascending=False)
     df_plot = df[df['price'] <= max_price]
@@ -380,9 +384,9 @@ def create_scatter_revenue(df_amazon, brand_map, max_price=20):
     ax.set_yscale('log')
     ax.set_xlabel('Price ($)', fontsize=12)
     ax.set_ylabel('Monthly Revenue ($)', fontsize=12)
-    ax.set_title(f'Price vs. Estimated Monthly Revenue (up to ${max_price})', fontweight='bold')
+    ax.set_title(f'Price vs. Estimated Monthly Revenue (up to ${max_price:.2f}, 95th pct)', fontweight='bold')
     ax.grid(True, linestyle='--', alpha=0.3)
-    ax.set_xlim(0, max_price)
+    ax.set_xlim(0, max_price * 1.02)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{int(y):,}" if y >= 1 else f"{y:g}"))
 
     max_price_row = df.loc[df['price'].idxmax()]
@@ -421,6 +425,8 @@ def create_reviews_histogram_clipped(df_amazon, clip_max=5000):
     fig, ax = plt.subplots(figsize=(10,4))
     if len(clipped) > 0:
         ax.hist(clipped, bins=20, color='#1A4D8C', edgecolor='white', alpha=0.8, zorder=2)
+        _, current_top = ax.get_ylim()
+        ax.set_ylim(0, current_top * 1.2)
     median_val = reviews.median()
     ax.axvline(median_val, color='#8B0000', linestyle='--', linewidth=2.4, label=f'Median: {median_val:.0f}', zorder=6)
     ax.set_xlabel('Number of Reviews', fontsize=11)
@@ -478,6 +484,11 @@ def create_price_distribution_violin(df_amazon, brand_map, top_n=6):
     if df.empty:
         return None
 
+    clip_max = float(df['price'].quantile(0.95))
+    df = df[df['price'] <= clip_max]
+    if df.empty:
+        return None
+
     counts = df['brand'].value_counts()
     top_brands = counts[counts >= 2].head(top_n).index.tolist()
     if len(top_brands) < 2:
@@ -515,7 +526,7 @@ def create_price_distribution_violin(df_amazon, brand_map, top_n=6):
         ax=ax
     )
 
-    ax.set_title('Price Distribution by Brand (Violin + Data Points)', fontweight='bold')
+    ax.set_title(f'Price Distribution by Brand (Violin + Data Points, <=95th pct ${clip_max:.2f})', fontweight='bold')
     ax.set_xlabel('Price ($)')
     ax.set_ylabel('Brand')
     ax.grid(True, axis='x', linestyle='--', alpha=0.38)
@@ -561,10 +572,23 @@ def create_title_page(elements, search_query, date_str, logo_path=None, product_
         alignment=1, spaceAfter=12, fontName='Helvetica-Bold'
     )))
     keyword_style = ParagraphStyle(
-        'KeywordFocus', parent=styles['Normal'], fontSize=24,
-        textColor=colors.HexColor('#123A6F'), alignment=1, spaceAfter=26, fontName='Helvetica-Bold'
+        'KeywordFocus', parent=styles['Normal'], fontSize=26,
+        textColor=colors.HexColor('#123A6F'), alignment=1, spaceAfter=18,
+        fontName='Helvetica-Bold', leading=30, wordWrap='CJK'
     )
-    elements.append(Paragraph(f"<b>{search_query}</b>", ParagraphStyle('KeywordFocusXL', parent=keyword_style, fontSize=42, spaceAfter=14)))
+    elements.append(Spacer(1, 0.9*cm))
+    keyword_block = Table(
+        [[Paragraph(f"<b>{search_query}</b>", keyword_style)]],
+        colWidths=[14.8*cm]
+    )
+    keyword_block.setStyle(TableStyle([
+        ('LEFTPADDING', (0,0), (-1,-1), 0),
+        ('RIGHTPADDING', (0,0), (-1,-1), 0),
+        ('TOPPADDING', (0,0), (-1,-1), 0),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 0),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+    ]))
+    elements.append(keyword_block)
 
     inserted_image = False
     if logo_path and os.path.exists(logo_path):
@@ -642,6 +666,13 @@ def create_verdict_block(elements, cr3, avg_rating, sponsored_share, avg_reviews
     elements.append(Paragraph(sub_text, ParagraphStyle('SubVerdict', fontSize=10, textColor=colors.HexColor('#555555'), alignment=1)))
     elements.append(Spacer(1, 0.8*cm))
 
+def concentration_label(sat_score):
+    if sat_score > 70:
+        return "High Concentration"
+    if sat_score > 50:
+        return "Moderate Concentration"
+    return "Low Concentration"
+
 def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_competition):
     styles = getSampleStyleSheet()
     header = ParagraphStyle('SectionHeader', parent=styles['Heading2'], fontSize=16,
@@ -666,7 +697,7 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
         ["Avg Rating", f"{df_amazon['rating'].mean():.2f}"],
         ["Avg Reviews (Top10)", f"{avg_reviews:,.0f}"],
         ["Competition (final)", final_competition],
-        ["Saturation Index (CR3)", f"{int(sat_score)}%"],
+        ["Saturation Index (CR3)", f"{int(sat_score)}% ({concentration_label(sat_score)})"],
         ["Avg. Revenue per Listing", format_compact_currency(market_size / max(1, df_amazon['asin'].nunique()))],
     ]
     if df_details is not None and 'is_fsa_eligible' in df_details.columns:
@@ -686,10 +717,19 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
         ('RIGHTPADDING', (0,0), (-1,-1), 8),
     ]
     for row_idx, row in enumerate(data[1:], start=1):
-        if row[0] == "Saturation Index (CR3)" and sat_score > 70:
+        if row[0] == "Saturation Index (CR3)":
+            if sat_score > 70:
+                cell_bg = colors.HexColor('#FFCDD2')
+                cell_fg = colors.HexColor('#B71C1C')
+            elif sat_score > 50:
+                cell_bg = colors.HexColor('#FFF9C4')
+                cell_fg = colors.HexColor('#8D6E00')
+            else:
+                cell_bg = colors.HexColor('#E8F5E9')
+                cell_fg = colors.HexColor('#1B5E20')
             style.extend([
-                ('BACKGROUND', (0, row_idx), (1, row_idx), colors.HexColor('#FFCDD2')),
-                ('TEXTCOLOR', (0, row_idx), (1, row_idx), colors.HexColor('#B71C1C')),
+                ('BACKGROUND', (0, row_idx), (1, row_idx), cell_bg),
+                ('TEXTCOLOR', (0, row_idx), (1, row_idx), cell_fg),
                 ('FONTNAME', (0, row_idx), (1, row_idx), 'Helvetica-Bold')
             ])
         if row[0] == "Competition (final)" and final_competition == "Very High":
@@ -804,7 +844,7 @@ def create_advanced_review_insights(elements, df_reviews, brand_map, top_asins, 
     if not pain_by_brand:
         elements.append(Paragraph("No significant negative feedback found.", styles['Normal']))
     else:
-        for asin, issues in list(pain_by_brand.items())[:3]:
+        for asin, issues in list(pain_by_brand.items())[:1]:  # показываем только первого лидера
             brand = get_brand_for_asin(asin, brand_map, 'Unknown')
             elements.append(Paragraph(f"• {brand}", styles['Heading3']))
             if issues:
@@ -908,19 +948,34 @@ def create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, s
         recs.append("PPC Difficulty: <b>High</b>. Expect expensive auctions and slower profitability.")
 
     if 'title' in df_amazon.columns:
-        leaders_text = " ".join(df_amazon.sort_values('position').head(10)['title'].dropna().astype(str).str.lower().tolist())
-        candidate_gaps = {
-            'black colorway': ['black'],
-            'eco packaging': ['eco', 'recycl', 'sustainable'],
-            '1000-piece bundle': ['1000', '1,000']
+        leader_titles = df_amazon.sort_values('position').head(12)['title'].dropna().astype(str).str.lower().tolist()
+        combined_titles = " ".join(leader_titles)
+        generic_gap_patterns = {
+            'extra large / family-size options': ['xl', 'extra large', 'family size', 'large capacity'],
+            'closure convenience (zip/clip/magnetic)': ['zip', 'clip', 'closure', 'magnetic', 'double seal'],
+            'travel-friendly bundles': ['travel', 'on-the-go', 'bundle', 'set of', 'multi pack'],
+            'easy-clean positioning': ['dishwasher safe', 'easy clean', 'wide opening']
         }
-        missing = [gap for gap, kws in candidate_gaps.items() if not any(k in leaders_text for k in kws)]
+        missing = [gap for gap, kws in generic_gap_patterns.items() if not any(k in combined_titles for k in kws)]
         if missing:
-            recs.append(f"<b>Market Gaps:</b> Underrepresented among current leaders: {', '.join(missing)}. Validate demand with PPC tests and launch with these differentiators in main image/A+ content.")
+            recs.append(
+                "<b>Market Gaps:</b> Potentially underrepresented in current top listings: "
+                f"{', '.join(missing[:3])}. Validate using keyword checks and small PPC tests before launch."
+            )
 
+    recommendation_items = []
     for r in recs:
         r = r.replace('sub‑niche', 'sub-niche').replace('sub■niche', 'sub-niche')
-        elements.append(Paragraph(f"• {r}", styles['Normal']))
+        recommendation_items.append(Paragraph(f"• {r}", styles['Normal']))
+
+    primary_items = recommendation_items[:5]
+    overflow_items = recommendation_items[5:]
+    if primary_items:
+        elements.append(KeepTogether(primary_items))
+    if overflow_items:
+        elements.append(PageBreak())
+        elements.append(Paragraph("Strategic Recommendations (Continued)", header))
+        elements.append(KeepTogether(overflow_items))
     elements.append(Spacer(1, 0.5*cm))
 
 # ========== MAIN ==========
@@ -975,7 +1030,7 @@ def generate_report(input_dir, output_file):
                             topMargin=2*cm, bottomMargin=2*cm)
     elements = []
 
-    display_keyword = "Nail Studs" if str(search_query).strip().lower() == "nail studs" else f"Keyword: {search_query}"
+    display_keyword = str(search_query).strip() if str(search_query).strip() else "N/A"
     create_title_page(elements, display_keyword, date_str, logo_path, None)
     create_verdict_block(elements, sat_score, avg_rating, sponsored_share, comp_reviews, final_competition)
     create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_competition)
@@ -984,7 +1039,7 @@ def generate_report(input_dir, output_file):
     elements.append(Paragraph("Visual Analysis", ParagraphStyle('SectionHeader', fontSize=16,
                                                                  textColor=colors.HexColor('#1A4D8C'), spaceAfter=10)))
 
-    sp, outliers = create_scatter_revenue(df_amazon, brand_map, max_price=20)
+    sp, outliers = create_scatter_revenue(df_amazon, brand_map)
     if sp:
         elements.append(Image(sp, width=14*cm, height=8*cm))
         elements.append(Spacer(1, 0.5*cm))
@@ -1030,6 +1085,14 @@ def generate_report(input_dir, output_file):
     create_top10_table(elements, df_amazon, brand_map, velocities, min_revenue=500)
 
     create_advanced_review_insights(elements, df_reviews, brand_map, top_asins, pain_by_brand)
+
+    feedback_volume = 0
+    for _, issues in pain_by_brand.items():
+        for _, _, example in issues:
+            feedback_volume += len(str(example))
+    if feedback_volume > 400:
+        elements.append(PageBreak())
+
     create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, sponsored_share,
                                    has_low_review_top, pain_by_brand)
 
@@ -1046,5 +1109,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-#ЧЛЕН

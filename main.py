@@ -23,7 +23,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
-from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.ticker import FuncFormatter
 
 from reportlab.pdfgen import canvas
@@ -32,7 +31,7 @@ from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, Image, KeepTogether
+    PageBreak, Image, KeepTogether, CondPageBreak
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.utils import ImageReader
@@ -375,11 +374,9 @@ def create_scatter_revenue(df_amazon, brand_map, max_price=None):
     if len(df_plot) < 3:
         return None, outliers
 
-    premium_cmap = LinearSegmentedColormap.from_list('premium_gold_navy', ['#D4AF37', '#0D1B2A'])
-
     fig, ax = plt.subplots(figsize=(10,6))
     scatter = ax.scatter(df_plot['price'], df_plot['monthly_rev'],
-                         c=df_plot['price'], cmap=premium_cmap, alpha=0.78,
+                         c=df_plot['price'], cmap='viridis', alpha=0.78,
                          edgecolors='w', linewidth=0.5, s=50)
     ax.set_yscale('log')
     ax.set_xlabel('Price ($)', fontsize=12)
@@ -398,9 +395,10 @@ def create_scatter_revenue(df_amazon, brand_map, max_price=None):
                     fontsize=9, color='#111111',
                     bbox=dict(boxstyle='round,pad=0.35', fc='white', ec='#0D1B2A', lw=1.2, alpha=0.92))
     else:
+        y_anchor = float(df_plot['monthly_rev'].quantile(0.9))
         ax.annotate(f"Top outlier: {get_brand_for_asin(max_price_row['asin'], brand_map, '?')}\n${max_price_row['price']:.2f}",
-                    xy=(max_price * 0.95, df_plot['monthly_rev'].max()),
-                    xytext=(-5, -25), textcoords='offset points', ha='right',
+                    xy=(max_price * 0.98, y_anchor),
+                    xytext=(-10, 18), textcoords='offset points', ha='right', va='bottom',
                     fontsize=9, color='#111111',
                     bbox=dict(boxstyle='round,pad=0.35', fc='white', ec='#0D1B2A', lw=1.2, alpha=0.92))
     cbar = fig.colorbar(scatter, ax=ax, fraction=0.03, pad=0.02, aspect=30)
@@ -438,7 +436,7 @@ def create_reviews_histogram_clipped(df_amazon, clip_max=5000):
         text = f"{len(outliers)} product(s) have >{clip_max} reviews:\n" + ", ".join([f"{int(r):,}" for r in outliers[:5]])
         if len(outliers) > 5:
             text += f" and {len(outliers)-5} more"
-        ax.text(0.98, 0.18, text, transform=ax.transAxes, ha='right', va='bottom',
+        ax.text(0.98, 0.25, text, transform=ax.transAxes, ha='right', va='bottom',
                 fontsize=9, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
     plt.tight_layout()
     img_data = io.BytesIO()
@@ -462,8 +460,10 @@ def create_heatmap(df_amazon):
     corr = df_amazon[num_cols].corr()
     fig, ax = plt.subplots(figsize=(6,5))
     tick_values = np.linspace(-1, 1, 9)
-    sns.heatmap(corr, annot=True, cmap='coolwarm', center=0, ax=ax, square=True,
-                cbar_kws={'ticks': tick_values})
+    hm = sns.heatmap(corr, annot=True, cmap='coolwarm', center=0, ax=ax, square=True,
+                     cbar_kws={'ticks': tick_values, 'fraction': 0.02, 'aspect': 40, 'pad': 0.02})
+    if hm.collections and hm.collections[0].colorbar is not None:
+        hm.collections[0].colorbar.ax.tick_params(labelsize=8)
     ax.set_title('Correlation Heatmap', fontweight='bold', pad=28)
     ax.text(0.5, 1.13, 'Price vs. Rating vs. Reviews Count', transform=ax.transAxes,
             ha='center', va='bottom', fontsize=9, color='#546E7A')
@@ -485,9 +485,7 @@ def create_price_distribution_violin(df_amazon, brand_map, top_n=6):
         return None
 
     clip_max = float(df['price'].quantile(0.95))
-    df = df[df['price'] <= clip_max]
-    if df.empty:
-        return None
+    plot_xlim = clip_max * 1.02
 
     counts = df['brand'].value_counts()
     top_brands = counts[counts >= 2].head(top_n).index.tolist()
@@ -530,6 +528,22 @@ def create_price_distribution_violin(df_amazon, brand_map, top_n=6):
     ax.set_xlabel('Price ($)')
     ax.set_ylabel('Brand')
     ax.grid(True, axis='x', linestyle='--', alpha=0.38)
+    ax.set_xlim(0, max(plot_xlim, 1))
+
+    violin_count = len(ax.collections)
+    other_idx = None
+    if 'Other Brands' in plot_order:
+        other_idx = plot_order.index('Other Brands')
+    if other_idx is not None and violin_count > 0:
+        body_idx = min(other_idx, violin_count - 1)
+        ax.collections[body_idx].set_alpha(0.4)
+        other_prices = df.loc[df['brand_for_plot'] == 'Other Brands', 'price']
+        if len(other_prices) > 0 and other_prices.max() > clip_max:
+            tail_count = int((other_prices > clip_max).sum())
+            ax.text(0.98, 0.05,
+                    f"Other Brands tail: {tail_count} SKU(s) above 95th pct (max ${other_prices.max():.2f})",
+                    transform=ax.transAxes, ha='right', va='bottom', fontsize=8.5,
+                    bbox=dict(boxstyle='round', facecolor='#FFF3E0', alpha=0.85, edgecolor='#FFB74D'))
 
     plt.tight_layout()
     img_data = io.BytesIO()
@@ -574,12 +588,12 @@ def create_title_page(elements, search_query, date_str, logo_path=None, product_
     keyword_style = ParagraphStyle(
         'KeywordFocus', parent=styles['Normal'], fontSize=26,
         textColor=colors.HexColor('#123A6F'), alignment=1, spaceAfter=18,
-        fontName='Helvetica-Bold', leading=30, wordWrap='CJK'
+        fontName='Helvetica-Bold', leading=32, wordWrap='CJK', splitLongWords=True
     )
     elements.append(Spacer(1, 0.9*cm))
     keyword_block = Table(
         [[Paragraph(f"<b>{search_query}</b>", keyword_style)]],
-        colWidths=[14.8*cm]
+        colWidths=[16.3*cm]
     )
     keyword_block.setStyle(TableStyle([
         ('LEFTPADDING', (0,0), (-1,-1), 0),
@@ -683,6 +697,12 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
     comp_reviews, avg_reviews = competition_level_by_reviews(df_amazon)
     sponsored_share, _ = keyword_competition(df_amazon)
     concentration = concentration_color(sat_score)
+    median_reviews = float(df_amazon['reviews_count'].dropna().median()) if 'reviews_count' in df_amazon.columns else 0
+    concentration_note = concentration_label(sat_score)
+    discrepancy_note = (
+        f"Anomaly in average reviews of top 10 ({avg_reviews:,.0f}) compared to median ({median_reviews:,.0f}) "
+        "indicates the presence of several dominant giant brands, creating a significant barrier for new entrants."
+    )
 
     prices = df_amazon['price'].dropna()
     price_range = f"${prices.quantile(0.25):.2f} – ${prices.quantile(0.75):.2f}" if len(prices) > 0 else "N/A"
@@ -697,14 +717,21 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
         ["Avg Rating", f"{df_amazon['rating'].mean():.2f}"],
         ["Avg Reviews (Top10)", f"{avg_reviews:,.0f}"],
         ["Competition (final)", final_competition],
-        ["Saturation Index (CR3)", f"{int(sat_score)}% ({concentration_label(sat_score)})"],
+        ["Saturation Index (CR3)", f"{int(sat_score)}% ({concentration_note})"],
         ["Avg. Revenue per Listing", format_compact_currency(market_size / max(1, df_amazon['asin'].nunique()))],
     ]
+    if final_competition == "Very High" and 50 <= sat_score <= 70:
+        data.append([
+            "Competition note",
+            f"*Despite a CR3 of {sat_score:.1f}%, the market is dominated by few brands with strong "
+            "product differentiation and high marketing spend, making organic entry challenging.*"
+        ])
+    data.append(["Market structure note", discrepancy_note])
     if df_details is not None and 'is_fsa_eligible' in df_details.columns:
         fsa_pct = (df_details['is_fsa_eligible'].sum() / len(df_details)) * 100
         data.append(["FSA/HSA Eligible", f"{fsa_pct:.1f}%"])
 
-    table = Table(data, colWidths=[5.8*cm, 6.0*cm])
+    table = Table(data, colWidths=[5.8*cm, 10.4*cm])
     style = [
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1A4D8C')),
         ('TEXTCOLOR', (0,0), (-1,0), colors.white),
@@ -737,6 +764,14 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
                 ('BACKGROUND', (0, row_idx), (1, row_idx), colors.HexColor('#FFCDD2')),
                 ('TEXTCOLOR', (0, row_idx), (1, row_idx), colors.HexColor('#B71C1C')),
                 ('FONTNAME', (0, row_idx), (1, row_idx), 'Helvetica-Bold')
+            ])
+        if row[0] in ("Competition note", "Market structure note"):
+            style.extend([
+                ('BACKGROUND', (0, row_idx), (1, row_idx), colors.HexColor('#F5F7FA')),
+                ('FONTNAME', (0, row_idx), (0, row_idx), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, row_idx), (1, row_idx), 9),
+                ('TOPPADDING', (0, row_idx), (1, row_idx), 8),
+                ('BOTTOMPADDING', (0, row_idx), (1, row_idx), 8),
             ])
     table.setStyle(TableStyle(style))
     elements.append(table)
@@ -889,8 +924,6 @@ def create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, s
     styles = getSampleStyleSheet()
     header = ParagraphStyle('SectionHeader', parent=styles['Heading2'], fontSize=16,
                             textColor=colors.HexColor('#1A4D8C'), spaceAfter=10)
-    elements.append(Paragraph("Strategic Recommendations", header))
-
     recs = []
 
     if 'asin' in df_amazon.columns:
@@ -968,14 +1001,30 @@ def create_dynamic_recommendations(elements, df_amazon, sat_score, avg_rating, s
         r = r.replace('sub‑niche', 'sub-niche').replace('sub■niche', 'sub-niche')
         recommendation_items.append(Paragraph(f"• {r}", styles['Normal']))
 
-    primary_items = recommendation_items[:5]
-    overflow_items = recommendation_items[5:]
-    if primary_items:
-        elements.append(KeepTogether(primary_items))
-    if overflow_items:
-        elements.append(PageBreak())
-        elements.append(Paragraph("Strategic Recommendations (Continued)", header))
-        elements.append(KeepTogether(overflow_items))
+    approx_lines = sum(max(1, int(np.ceil(len(re.sub(r'<[^>]+>', '', r)) / 95))) for r in recs)
+    approx_height_cm = 1.2 + (approx_lines * 0.5) + (len(recs) * 0.18)
+    elements.append(CondPageBreak(min(24 * cm, approx_height_cm * cm)))
+
+    if recommendation_items:
+        max_lines_per_block = 30
+        chunks, current_chunk, current_lines = [], [], 0
+        for idx, item in enumerate(recommendation_items):
+            est_lines = max(1, int(np.ceil(len(re.sub(r'<[^>]+>', '', recs[idx])) / 95)))
+            if current_chunk and (current_lines + est_lines > max_lines_per_block):
+                chunks.append(current_chunk)
+                current_chunk, current_lines = [], 0
+            current_chunk.append(item)
+            current_lines += est_lines
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        if chunks:
+            first_block = [Paragraph("Strategic Recommendations", header)] + chunks[0]
+            elements.append(KeepTogether(first_block))
+            for chunk in chunks[1:]:
+                elements.append(PageBreak())
+                elements.append(Paragraph("Strategic Recommendations (Continued)", header))
+                elements.append(KeepTogether(chunk))
     elements.append(Spacer(1, 0.5*cm))
 
 # ========== MAIN ==========

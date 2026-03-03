@@ -3,7 +3,7 @@
 
 """
 Amazon Niche Premium Report Generator
-Version 17.0 – ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
+Version 27.0 – ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
 Основана на диагностике: PNG через BytesIO работает стабильно.
 """
 
@@ -256,7 +256,7 @@ def determine_final_competition(comp_reviews, sat_score):
     elif sat_score > 50 or comp_reviews == "Medium":
         return "High"
     else:
-        return "Medium"
+        return "Moderate"
 
 def concentration_color(sat_score):
     if sat_score > 70:
@@ -652,18 +652,58 @@ def create_title_page(elements, search_query, date_str, logo_path=None, product_
     elements.append(PageBreak())
 
 def create_verdict_block(elements, cr3, avg_rating, sponsored_share, avg_reviews_level, final_competition):
-    if cr3 > 70 or final_competition in ("Very High", "High"):
+    HIGH_RISK_CR3_THRESHOLD = 70
+    MODERATE_RISK_CR3_THRESHOLD = 40
+    HIGH_SPONSORED_SHARE_THRESHOLD = 30
+    MODERATE_SPONSORED_SHARE_THRESHOLD = 20
+
+    VERY_HIGH_COMPETITION = "Very High"
+    HIGH_COMPETITION = "High"
+
+    reasons = []
+    if final_competition == VERY_HIGH_COMPETITION:
+        reasons.append("very high competition")
+    elif final_competition == HIGH_COMPETITION:
+        reasons.append("high competition")
+    elif final_competition == "Moderate":
+        reasons.append("moderate competition")
+
+    if cr3 > HIGH_RISK_CR3_THRESHOLD:
+        reasons.append(f"high concentration (CR3 {cr3:.1f}%)")
+    elif cr3 > MODERATE_RISK_CR3_THRESHOLD:
+        reasons.append(f"moderate concentration (CR3 {cr3:.1f}%)")
+
+    if sponsored_share > HIGH_SPONSORED_SHARE_THRESHOLD:
+        reasons.append(f"high ad pressure ({sponsored_share:.1f}% sponsored)")
+    elif sponsored_share > MODERATE_SPONSORED_SHARE_THRESHOLD:
+        reasons.append(f"elevated ad pressure ({sponsored_share:.1f}% sponsored)")
+
+    if cr3 > HIGH_RISK_CR3_THRESHOLD or final_competition == VERY_HIGH_COMPETITION or sponsored_share > HIGH_SPONSORED_SHARE_THRESHOLD:
         verdict_text = "GO / NO-GO: HIGH RISK"
         bg_color = colors.HexColor('#D32F2F')
-        sub_text = "Market is highly concentrated. Entry requires a unique advantage (patent / distinct form factor)."
-    elif cr3 > 40 or avg_rating < 4.2 or sponsored_share > 30:
+        sub_text = (
+            "Market is highly concentrated or competitive. Entry requires a strong unique advantage "
+            "or significant marketing investment"
+        )
+    elif (
+        cr3 > MODERATE_RISK_CR3_THRESHOLD
+        or final_competition == HIGH_COMPETITION
+        or avg_rating < 4.2
+        or sponsored_share > MODERATE_SPONSORED_SHARE_THRESHOLD
+    ):
         verdict_text = "GO / NO-GO: MODERATE OPPORTUNITY"
         bg_color = colors.HexColor('#FBC02D')
-        sub_text = "Some challenges exist, but a well-executed entry could succeed."
+        sub_text = (
+            "Market presents some challenges but offers opportunities for well-differentiated products "
+            "or strategic marketing"
+        )
     else:
         verdict_text = "GO / NO-GO: ATTRACTIVE ENTRY"
         bg_color = colors.HexColor('#388E3C')
-        sub_text = "Low concentration, healthy market – good time to launch."
+        sub_text = "Favorable market conditions with low competition and good potential for new entrants"
+
+    if reasons:
+        sub_text = f"{sub_text}. Key factors: {', '.join(reasons[:3])}."
 
     data = [[Paragraph(verdict_text,
                        ParagraphStyle('Verdict', fontSize=14, textColor='white', alignment=1, fontName='Helvetica-Bold'))]]
@@ -699,9 +739,11 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
     concentration = concentration_color(sat_score)
     median_reviews = float(df_amazon['reviews_count'].dropna().median()) if 'reviews_count' in df_amazon.columns else 0
     concentration_note = concentration_label(sat_score)
+    review_gap_ratio = (avg_reviews / median_reviews) if median_reviews > 0 else float('inf')
+    significant_discrepancy = (median_reviews == 0 and avg_reviews > 0) or review_gap_ratio >= 1.75
     discrepancy_note = (
-        f"Anomaly in average reviews of top 10 ({avg_reviews:,.0f}) compared to median ({median_reviews:,.0f}) "
-        "indicates the presence of several dominant giant brands, creating a significant barrier for new entrants."
+        f"Average reviews in Top 10 ({avg_reviews:,.0f}) versus market median ({median_reviews:,.0f}) "
+        "show a concentrated structure with dominant listings."
     )
 
     prices = df_amazon['price'].dropna()
@@ -720,13 +762,14 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
         ["Saturation Index (CR3)", f"{int(sat_score)}% ({concentration_note})"],
         ["Avg. Revenue per Listing", format_compact_currency(market_size / max(1, df_amazon['asin'].nunique()))],
     ]
-    if final_competition == "Very High" and 50 <= sat_score <= 70:
+    if final_competition == "Very High":
         data.append([
             "Competition note",
-            f"*Despite a CR3 of {sat_score:.1f}%, the market is dominated by few brands with strong "
-            "product differentiation and high marketing spend, making organic entry challenging.*"
+            f"Competition is very high. Even with CR3 at {sat_score:.1f}%, established leaders and strong "
+            "ad intensity make organic entry difficult."
         ])
-    data.append(["Market structure note", discrepancy_note])
+    if significant_discrepancy:
+        data.append(["Market structure note", discrepancy_note])
     if df_details is not None and 'is_fsa_eligible' in df_details.columns:
         fsa_pct = (df_details['is_fsa_eligible'].sum() / len(df_details)) * 100
         data.append(["FSA/HSA Eligible", f"{fsa_pct:.1f}%"])
@@ -748,22 +791,31 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
             if sat_score > 70:
                 cell_bg = colors.HexColor('#FFCDD2')
                 cell_fg = colors.HexColor('#B71C1C')
-            elif sat_score > 50:
+            elif 50 <= sat_score <= 70:
                 cell_bg = colors.HexColor('#FFF9C4')
                 cell_fg = colors.HexColor('#8D6E00')
             else:
                 cell_bg = colors.HexColor('#E8F5E9')
                 cell_fg = colors.HexColor('#1B5E20')
             style.extend([
-                ('BACKGROUND', (0, row_idx), (1, row_idx), cell_bg),
-                ('TEXTCOLOR', (0, row_idx), (1, row_idx), cell_fg),
-                ('FONTNAME', (0, row_idx), (1, row_idx), 'Helvetica-Bold')
+                ('BACKGROUND', (1, row_idx), (1, row_idx), cell_bg),
+                ('TEXTCOLOR', (1, row_idx), (1, row_idx), cell_fg),
+                ('FONTNAME', (1, row_idx), (1, row_idx), 'Helvetica-Bold')
             ])
-        if row[0] == "Competition (final)" and final_competition == "Very High":
+        if row[0] == "Competition (final)":
+            if final_competition == "Very High":
+                competition_bg = colors.HexColor('#FFCDD2')
+                competition_fg = colors.HexColor('#B71C1C')
+            elif final_competition == "High":
+                competition_bg = colors.HexColor('#FFF9C4')
+                competition_fg = colors.HexColor('#8D6E00')
+            else:
+                competition_bg = colors.HexColor('#E8F5E9')
+                competition_fg = colors.HexColor('#1B5E20')
             style.extend([
-                ('BACKGROUND', (0, row_idx), (1, row_idx), colors.HexColor('#FFCDD2')),
-                ('TEXTCOLOR', (0, row_idx), (1, row_idx), colors.HexColor('#B71C1C')),
-                ('FONTNAME', (0, row_idx), (1, row_idx), 'Helvetica-Bold')
+                ('BACKGROUND', (1, row_idx), (1, row_idx), competition_bg),
+                ('TEXTCOLOR', (1, row_idx), (1, row_idx), competition_fg),
+                ('FONTNAME', (1, row_idx), (1, row_idx), 'Helvetica-Bold')
             ])
         if row[0] in ("Competition note", "Market structure note"):
             style.extend([

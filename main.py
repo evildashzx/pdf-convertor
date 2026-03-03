@@ -3,7 +3,7 @@
 
 """
 Amazon Niche Premium Report Generator
-Version 13.0 – ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
+Version 17.0 – ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
 Основана на диагностике: PNG через BytesIO работает стабильно.
 """
 
@@ -1046,3 +1046,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+#ЧЛЕН

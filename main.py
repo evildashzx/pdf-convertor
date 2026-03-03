@@ -3,7 +3,7 @@
 
 """
 Amazon Niche Premium Report Generator
-Version 27.0 – ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
+Version 17.0 – ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
 Основана на диагностике: PNG через BytesIO работает стабильно.
 """
 
@@ -731,6 +731,13 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
     styles = getSampleStyleSheet()
     header = ParagraphStyle('SectionHeader', parent=styles['Heading2'], fontSize=16,
                             textColor=colors.HexColor('#1A4D8C'), spaceAfter=10)
+    note_cell_style = ParagraphStyle(
+        'SummaryNoteCell',
+        parent=styles['BodyText'],
+        fontSize=9,
+        leading=11,
+        wordWrap='CJK',
+    )
     elements.append(Paragraph("Market Summary", header))
 
     market_size = calculate_market_size(df_amazon)
@@ -765,11 +772,14 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
     if final_competition == "Very High":
         data.append([
             "Competition note",
-            f"Competition is very high. Even with CR3 at {sat_score:.1f}%, established leaders and strong "
-            "ad intensity make organic entry difficult."
+            Paragraph(
+                f"Competition is very high. Even with CR3 at {sat_score:.1f}%, established leaders and strong "
+                "ad intensity make organic entry difficult.",
+                note_cell_style,
+            ),
         ])
     if significant_discrepancy:
-        data.append(["Market structure note", discrepancy_note])
+        data.append(["Market structure note", Paragraph(discrepancy_note, note_cell_style)])
     if df_details is not None and 'is_fsa_eligible' in df_details.columns:
         fsa_pct = (df_details['is_fsa_eligible'].sum() / len(df_details)) * 100
         data.append(["FSA/HSA Eligible", f"{fsa_pct:.1f}%"])
@@ -779,6 +789,7 @@ def create_summary(elements, df_amazon, df_details, brand_map, sat_score, final_
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1A4D8C')),
         ('TEXTCOLOR', (0,0), (-1,0), colors.white),
         ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
         ('GRID', (0,0), (-1,-1), 1, colors.grey),
         ('TOPPADDING', (0,0), (-1,-1), 11),
